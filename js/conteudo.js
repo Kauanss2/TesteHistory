@@ -210,7 +210,13 @@ window.Conteudo = (function () {
   const ponto = (m) => [m[4], m[5]];
 
   // [{ k (índice do comando), x0, y0, x1, y1 (início e fim na página), tr }]
-  function textosDaPagina(ops, recursos) {
+  // larguras: por comando de texto, na ordem da página, as larguras (em "em") que o
+  // pdf.js usou para desenhar cada caractere (ver largurasDoPdfjs). Com elas o fim
+  // de cada comando é exato; sem elas, usa as tabelas da fonte, que às vezes erram
+  // um pouco — e um pedaço do texto (ex.: o "1" de "2017", escrito num comando
+  // separado) parecia cair fora do número e ficava visível.
+  function textosDaPagina(ops, recursos, larguras) {
+    let nTexto = 0;
     const segmentos = [];
     const fontes = new Map();
     let ctm = [1, 0, 0, 1, 0, 0];
@@ -222,8 +228,15 @@ window.Conteudo = (function () {
     const trm = () => mul([ts.tam * ts.Th, 0, 0, ts.tam, 0, ts.Ts], mul(tm, ctm));
 
     function mostrar(k, partes) {
+      const doPdfjs = larguras?.[nTexto++];
       if (!tm || !ts.info) return;
       const [x0, y0] = ponto(trm());
+      const passo = ts.info.doisBytes ? 2 : 1;
+      const codigos = partes.filter((p) => p.t === 'str' || p.t === 'hex')
+        .reduce((n, p) => n + Math.floor(bytesDaString(p).length / passo), 0);
+      // só confia nas larguras do pdf.js se a contagem de caracteres bater
+      const exatas = doPdfjs && doPdfjs.length === codigos ? doPdfjs : null;
+      let g = 0;
       for (const p of partes) {
         if (p.t === 'num') {
           tm = mul([1, 0, 0, 1, (-p.v / 1000) * ts.tam * ts.Th, 0], tm);
@@ -231,10 +244,11 @@ window.Conteudo = (function () {
         }
         if (p.t !== 'str' && p.t !== 'hex') continue;
         const b = bytesDaString(p);
-        const passo = ts.info.doisBytes ? 2 : 1;
         for (let i = 0; i + passo - 1 < b.length; i += passo) {
           const c = passo === 2 ? (b[i] << 8) | b[i + 1] : b[i];
-          const avanco = ((ts.info.largura(c) / 1000) * ts.tam + ts.Tc + (passo === 1 && c === 32 ? ts.Tw : 0)) * ts.Th;
+          const em = exatas ? exatas[g] : ts.info.largura(c) / 1000;
+          g++;
+          const avanco = (em * ts.tam + ts.Tc + (passo === 1 && c === 32 ? ts.Tw : 0)) * ts.Th;
           tm = mul([1, 0, 0, 1, avanco, 0], tm);
         }
       }
@@ -279,17 +293,40 @@ window.Conteudo = (function () {
 
   // ---------- Esconder ----------
 
+  // Larguras (em "em") de cada caractere de cada comando de texto da página, como o
+  // pdf.js desenhou. Ordem = ordem dos comandos de texto no conteúdo da página
+  // (textos de objetos internos, os "forms", ficam de fora, como em ocultar()).
+  async function largurasDoPdfjs(pagePdfjs) {
+    const { OPS, AnnotationMode } = pdfjsLib;
+    const lista = await pagePdfjs.getOperatorList({ annotationMode: AnnotationMode.DISABLE });
+    const MOSTRAR = new Map([[OPS.showText, 0], [OPS.showSpacedText, 0], [OPS.nextLineShowText, 0], [OPS.nextLineSetSpacingShowText, 2]]);
+    const resultado = [];
+    let matrizFonte = [0.001];
+    let nivelForm = 0;
+    lista.fnArray.forEach((fn, i) => {
+      const args = lista.argsArray[i];
+      if (fn === OPS.paintFormXObjectBegin) nivelForm++;
+      else if (fn === OPS.paintFormXObjectEnd) nivelForm--;
+      else if (fn === OPS.setFont) {
+        try { matrizFonte = pagePdfjs.commonObjs.get(args[0])?.fontMatrix || [0.001]; } catch { matrizFonte = [0.001]; }
+      } else if (MOSTRAR.has(fn) && nivelForm === 0) {
+        const glifos = args[MOSTRAR.get(fn)] || [];
+        resultado.push(glifos.filter((x) => typeof x !== 'number').map((x) => (x?.width ?? 0) * matrizFonte[0]));
+      }
+    });
+    return resultado;
+  }
+
   // alvos: [{ id, x, y, w, tamanho }] (linha de base, em pontos do PDF).
-  // Esconde, na página, os comandos de texto que caem (quase) inteiros dentro de
-  // cada alvo. Devolve os ids escondidos por completo; os outros ficam para a
-  // cobertura antiga.
-  function ocultar(doc, indicePagina, alvos) {
+  // Esconde, na página, os comandos de texto que caem dentro de cada alvo.
+  // Devolve os ids escondidos por completo; os outros ficam para a cobertura antiga.
+  function ocultar(doc, indicePagina, alvos, larguras) {
     const page = doc.getPages()[indicePagina];
     const refs = refsConteudo(page);
     if (!refs.length || !alvos.length) return new Set();
     const s = refs.map((r) => paraTexto(bytesDoStream(doc, r))).join('\n');
     const ops = operacoes(s);
-    const segmentos = textosDaPagina(ops, page.node.Resources());
+    const segmentos = textosDaPagina(ops, page.node.Resources(), larguras);
 
     const ocultos = new Set();
     const escolhidos = new Map(); // k -> segmento
@@ -304,9 +341,12 @@ window.Conteudo = (function () {
         const a1 = Math.max(sg.x0, sg.x1);
         const dentro = Math.min(a1, fim) - Math.max(a0, ini);
         const comprimento = a1 - a0;
-        // o comando tem de estar quase todo dentro do alvo (não esconder texto vizinho)
-        const ok = comprimento < 0.01 ? a0 >= ini && a0 <= fim : dentro / comprimento >= 0.9;
-        if (!ok) continue;
+        // o comando tem de estar quase todo dentro do alvo (não esconder texto vizinho);
+        // reserva: se começa dentro do alvo e não passa muito do fim, também conta
+        // (cobre um erro pequeno na largura calculada)
+        const quaseTodo = comprimento < 0.01 ? a0 >= ini && a0 <= fim : dentro / comprimento >= 0.9;
+        const comecaDentro = sg.x0 >= ini && sg.x0 <= alvo.x + alvo.w - 0.2 && a1 <= fim + 0.25 * alvo.tamanho;
+        if (!quaseTodo && !comecaDentro) continue;
         meus.push(sg);
         soma += Math.max(0, Math.min(a1, alvo.x + alvo.w) - Math.max(a0, alvo.x));
       }
@@ -339,5 +379,5 @@ window.Conteudo = (function () {
     return true;
   }
 
-  return { ocultar, desocultar };
+  return { ocultar, desocultar, largurasDoPdfjs };
 })();

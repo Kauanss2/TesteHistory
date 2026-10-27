@@ -310,7 +310,10 @@
       div.append(canvas, camada);
       area.append(div);
       await page.render({ canvasContext: canvas.getContext('2d'), viewport, transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null }).promise;
-      paginasTela.push({ canvas, viewport, dpr });
+      // larguras exatas de cada caractere, para achar o comando de cada texto (conteudo.js)
+      let larguras = null;
+      try { larguras = await Conteudo.largurasDoPdfjs(page); } catch { /* usa as tabelas da fonte */ }
+      paginasTela.push({ canvas, viewport, dpr, larguras });
 
       // Cópia invisível em alta resolução (~4 px por ponto do PDF) só para medir
       // fundo, cor do texto e bordas: na tela uma borda fina tem menos de 1 px e
@@ -751,7 +754,7 @@
     const ocultos = new Set();
     for (const [pagina, alvos] of porPagina) {
       try {
-        for (const id of Conteudo.ocultar(doc, pagina, alvos)) ocultos.add(id);
+        for (const id of Conteudo.ocultar(doc, pagina, alvos, paginasTela[pagina]?.larguras)) ocultos.add(id);
       } catch { /* comandos que o app não entende: fica a cobertura */ }
     }
     return ocultos;
