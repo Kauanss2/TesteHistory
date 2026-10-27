@@ -63,6 +63,7 @@
     const n = restaurarEdicoes(lista ?? lembradas());
     atualizarStatus(n ? aviso(n) : undefined);
     lembrar();
+    if (n) agendarFundo();
   }
 
   // ---------- Memória das edições ----------
@@ -101,7 +102,8 @@
   function restaurarEdicoes(lista) {
     const usados = new Set();
     for (const s of lista) {
-      if (s.capa) {
+      if ('capa' in s) {
+        if (!s.capa) continue; // texto de camada nova: a alteração vem da gravação no PDF
         const t = trechoSobCapa(s);
         if (!t) continue;
         usados.add(t.id);
@@ -157,6 +159,8 @@
 
   async function desfazerCamadas(bytes) {
     const doc = await PDFDocument.load(bytes);
+    const gravadas = lerMeta(doc); // PDFs do formato novo trazem as alterações gravadas
+    doc.catalog.delete(PDFName.of(META));
     let lista = [];
     doc.getPages().forEach((page, pagina) => {
       for (;;) {
@@ -173,7 +177,10 @@
         lista = [...camada.map((e) => ({ ...e, pagina })), ...lista];
         page.node.set(PDFName.of('Contents'), doc.context.obj(refs.slice(1, k)));
       }
+      Conteudo.desocultar(doc, page); // o texto antigo, escondido pelo comando, volta
     });
+    // as gravadas no PDF já incluem as das camadas de formato novo (sem cobertura)
+    lista = [...lista.filter((e) => e.capa), ...gravadas];
     return lista.length ? { bytes: await doc.save(), edicoes: lista } : null;
   }
 
@@ -253,7 +260,9 @@
         const borda = atual && !atual.temTexto && perto(b.y, atual.capa.y) && perto(b.h, atual.capa.h) && b.w < atual.capa.w;
         if (!borda) { atual = { capa: { x: b.x, y: b.y, w: b.w, h: b.h }, estado: {} }; lista.push(atual); }
       } else {
-        if (!atual || atual.temTexto) return null;
+        // texto sem cobertura antes: o antigo foi escondido pelo comando (formato
+        // novo); a alteração em si vem gravada no PDF (lerMeta)
+        if (!atual || atual.temTexto) { atual = { capa: null, estado: {} }; lista.push(atual); }
         const { tipo, ...estado } = b;
         atual.estado = estado;
         atual.temTexto = true;
@@ -281,6 +290,8 @@
     desselecionar();
     area.innerHTML = '';
     trechos = [];
+    paginasTela = [];
+    ocultosTela = new Set();
     const largura = Math.min(1100, area.clientWidth - 32) * zoom;
     for (let n = 1; n <= pdfAtual.numPages; n++) {
       const page = await pdfAtual.getPage(n);
@@ -299,6 +310,7 @@
       div.append(canvas, camada);
       area.append(div);
       await page.render({ canvasContext: canvas.getContext('2d'), viewport, transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null }).promise;
+      paginasTela.push({ canvas, viewport, dpr });
 
       // Cópia invisível em alta resolução (~4 px por ponto do PDF) só para medir
       // fundo, cor do texto e bordas: na tela uma borda fina tem menos de 1 px e
@@ -320,6 +332,7 @@
       }
       analise.width = analise.height = 0; // libera a memória (importante no celular)
     }
+    if (edicoes.size) atualizarFundo();
   }
 
   function criarTrecho(pagina, item, estilo, page, viewport, canvas, dpr) {
@@ -336,7 +349,7 @@
     const cores = amostrarCores(ctx, canvas, tela, dpr);
 
     const t = {
-      id: trechos.length, pagina, original: item.str, x, y, tamanho, ascent, descent, viewport,
+      id: trechos.length, pagina, original: item.str, x, y, largura: ret.w, tamanho, ascent, descent, viewport,
       fonte: descreverFonte(page, item.fontName, estilo), cores,
       capaPdf: calcularCapa(ctx, canvas, dpr, viewport, y, tela, cores.fundo, tamanho * viewport.scale),
     };
@@ -575,7 +588,8 @@
     });
     if (document.activeElement !== t.el && t.el.textContent !== e.texto) t.el.textContent = e.texto;
     t.el.classList.toggle('alterado', edicoes.has(t.id));
-    t.capa.hidden = !visivel;
+    // cobertura só enquanto a página ainda não foi redesenhada com o texto escondido
+    t.capa.hidden = !visivel || ocultosTela.has(t.id);
     if (selecionado === t) posicionarAlca();
   }
 
@@ -718,16 +732,45 @@
 
   // msg vazio = chamada depois de uma alteração: também guarda na memória
   function atualizarStatus(msg) {
-    if (msg === undefined && idPdf && trechos.length) lembrar();
+    if (msg === undefined && idPdf && trechos.length) { lembrar(); agendarFundo(); }
     botaoDesfazer.disabled = !edicoes.size;
     status.textContent = msg ?? (edicoes.size ? `${edicoes.size} texto(s) alterado(s)` : 'Toque/clique em um texto para editar.');
   }
 
   // ---------- Gerar o PDF ----------
 
+  // Esconde no próprio PDF o texto antigo de cada trecho alterado (ver conteudo.js).
+  // Devolve os ids escondidos; os outros ficam com a cobertura.
+  function ocultarEdicoes(doc) {
+    const porPagina = new Map();
+    for (const id of edicoes.keys()) {
+      const t = trechos[id];
+      if (!porPagina.has(t.pagina)) porPagina.set(t.pagina, []);
+      porPagina.get(t.pagina).push({ id, x: t.x, y: t.y, w: t.largura, tamanho: t.tamanho });
+    }
+    const ocultos = new Set();
+    for (const [pagina, alvos] of porPagina) {
+      try {
+        for (const id of Conteudo.ocultar(doc, pagina, alvos)) ocultos.add(id);
+      } catch { /* comandos que o app não entende: fica a cobertura */ }
+    }
+    return ocultos;
+  }
+
+  // Alterações gravadas dentro do PDF baixado, para a Correção refazer com exatidão.
+  // Pela posição na página (não pelo id), igual à leitura das camadas antigas.
+  const META = 'EditarPDF';
+
+  function lerMeta(doc) {
+    const s = doc.context.lookup(doc.catalog.get(PDFName.of(META)));
+    if (!(s instanceof PDFRawStream)) return [];
+    try { return JSON.parse(new TextDecoder().decode(decodePDFRawStream(s).decode())).edicoes || []; } catch { return []; }
+  }
+
   async function gerar() {
     const doc = await PDFDocument.load(original);
     const pages = doc.getPages();
+    const ocultos = ocultarEdicoes(doc);
     const fontes = {};
     const fonte = async ({ familia, negrito, italico }) => {
       const nome = FAMILIAS[familia].pdf[(negrito ? 1 : 0) + (italico ? 2 : 0)];
@@ -739,9 +782,12 @@
     for (const [id, e] of edicoes) {
       const t = trechos[id];
       const page = pages[t.pagina];
-      const r = t.capaPdf;
-      page.drawRectangle({ x: r.x, y: r.y, width: r.w, height: r.h, color: cor(t.cores.fundo) });
-      for (const l of t.linhas) page.drawRectangle({ x: l.x, y: r.y, width: l.w, height: r.h, color: cor(l.cor) });
+      if (!ocultos.has(id)) {
+        // não deu para esconder pelo comando: cobre e redesenha as bordas
+        const r = t.capaPdf;
+        page.drawRectangle({ x: r.x, y: r.y, width: r.w, height: r.h, color: cor(t.cores.fundo) });
+        for (const l of t.linhas) page.drawRectangle({ x: l.x, y: r.y, width: l.w, height: r.h, color: cor(l.cor) });
+      }
       if (!e.texto.trim()) continue;
       const f = await fonte(e);
       try {
@@ -750,7 +796,67 @@
         throw new Error(`O texto "${e.texto}" tem caractere que a fonte padrão não suporta (ex.: emoji).`);
       }
     }
+    // as de um PDF que já tinha sido editado vêm antes (mais antigas)
+    const meta = [...lerMeta(doc), ...[...edicoes].map(([id, e]) => {
+      const t = trechos[id];
+      return {
+        pagina: t.pagina, capa: t.capaPdf,
+        estado: { texto: e.texto, familia: e.familia, negrito: e.negrito, italico: e.italico, tamanho: e.tamanho, cor: e.cor, x: t.x + e.dx, y: t.y + e.dy },
+      };
+    })];
+    const ref = doc.context.register(doc.context.flateStream(new TextEncoder().encode(JSON.stringify({ versao: 2, edicoes: meta }))));
+    doc.catalog.set(PDFName.of(META), ref);
     return doc.save();
+  }
+
+  // ---------- Prévia igual ao PDF ----------
+  // As páginas alteradas são redesenhadas a partir de uma cópia do PDF com os
+  // textos antigos escondidos, então a tela mostra exatamente o que vai sair.
+
+  let ocultosTela = new Set(); // ids escondidos no desenho atual das páginas
+  let paginasTela = []; // por página: { canvas, viewport, dpr }
+  let fundoAgendado = null;
+  let versaoFundo = 0;
+
+  function agendarFundo() {
+    clearTimeout(fundoAgendado);
+    fundoAgendado = setTimeout(atualizarFundo, 300);
+  }
+
+  async function atualizarFundo() {
+    if (!original) return;
+    const versao = ++versaoFundo;
+    const telas = paginasTela;
+    let ocultos;
+    let bytes;
+    try {
+      const doc = await PDFDocument.load(original);
+      ocultos = ocultarEdicoes(doc);
+      bytes = await doc.save();
+    } catch { return; }
+    // páginas com texto escondido agora ou antes (para mostrar de volta o que voltou)
+    const paginas = new Set([...ocultosTela, ...ocultos].map((id) => trechos[id]?.pagina).filter((p) => p !== undefined));
+    if (versao !== versaoFundo || telas !== paginasTela) return;
+    if (paginas.size) {
+      const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
+      try {
+        for (const p of paginas) {
+          const { canvas, viewport, dpr } = telas[p];
+          const tmp = document.createElement('canvas');
+          tmp.width = canvas.width;
+          tmp.height = canvas.height;
+          await (await pdf.getPage(p + 1)).render({ canvasContext: tmp.getContext('2d'), viewport, transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null }).promise;
+          if (versao !== versaoFundo || telas !== paginasTela) return;
+          canvas.getContext('2d').drawImage(tmp, 0, 0);
+          tmp.width = tmp.height = 0;
+        }
+      } finally {
+        pdf.destroy();
+      }
+    }
+    if (versao !== versaoFundo || telas !== paginasTela) return;
+    ocultosTela = ocultos;
+    trechos.forEach(aplicar);
   }
 
   // ---------- Ações ----------

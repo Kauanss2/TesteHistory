@@ -50,17 +50,26 @@ celulares continuam com a versão antiga guardada.
 
 ## Como funciona
 
-No PDF baixado, o texto antigo é coberto com a cor do fundo e o novo é escrito
-no mesmo lugar, tamanho e cor. A cor do fundo é a mais frequente dentro do
-retângulo do texto; linhas/pontilhados logo abaixo ou acima não são cobertos, e
-bordas verticais de tabela que atravessam o texto são redesenhadas por cima. As
-medições são feitas numa cópia da página em alta resolução (~4 px por ponto). A fonte é a padrão mais parecida (sem serifa,
-com serifa ou monoespaçada; negrito/itálico), porque as fontes embutidas no
-PDF costumam vir só com as letras usadas.
+No PDF baixado, o texto antigo é **escondido no próprio comando do PDF** que o
+escreve (`js/conteudo.js`): o app lê os comandos da página, acha o que desenha
+aquele texto e o deixa invisível (modo de renderização 3). Nada em volta é
+coberto, então bordas, cantos, linhas e fundo ficam exatamente como eram. O
+texto novo é escrito no mesmo lugar, tamanho e cor, numa fonte padrão parecida
+(sem serifa, com serifa ou monoespaçada; negrito/itálico), porque as fontes
+embutidas no PDF costumam vir só com as letras usadas. A prévia na tela é
+redesenhada a partir desse mesmo PDF, então mostra o que vai sair.
+
+Se o comando não for encontrado (texto dentro de um objeto reutilizado, comando
+que mistura o texto com outro vizinho…), o app usa a cobertura: pinta o fundo
+(cor mais frequente dentro do retângulo do texto), sem cobrir linhas logo
+abaixo/acima e redesenhando bordas verticais que atravessam o texto.
+
+As alterações também ficam gravadas dentro do PDF baixado (chave `EditarPDF` do
+catálogo), para a **Correção** refazer com exatidão.
 
 Limitações:
-- o texto antigo continua no arquivo por baixo da cobertura: some da vista e
-  da impressão, mas pode ser copiado/selecionado em alguns leitores;
+- o texto antigo continua no arquivo, invisível: some da vista e da impressão,
+  mas pode ser copiado/selecionado em alguns leitores;
 - texto girado e texto que é imagem (PDF escaneado) não aparecem para edição;
 - emojis e caracteres fora do alfabeto latino não são suportados pela fonte padrão.
 
@@ -71,7 +80,8 @@ Limitações:
 | `index.html` | tela |
 | `manifest.webmanifest`, `icons/` | nome e ícone do app instalado |
 | `sw.js` | guarda os arquivos para funcionar sem internet |
-| `js/editor.js` | mostra as páginas, edição do texto, geração do PDF |
+| `js/editor.js` | mostra as páginas, edição do texto, geração do PDF, Correção |
+| `js/conteudo.js` | lê os comandos da página e esconde o texto antigo |
 | `css/app.css` | estilo da tela |
 | `vendor/pdf.min.js`, `vendor/pdf.worker.min.js` | [pdf.js](https://mozilla.github.io/pdf.js/) 3.11.174 (Apache-2.0): desenha as páginas e lê o texto |
 | `vendor/pdf-lib.min.js` | [pdf-lib](https://pdf-lib.js.org) 1.17.1 (MIT): grava o PDF editado |

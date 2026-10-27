@@ -1,11 +1,12 @@
 // Guarda os arquivos do app para funcionar sem internet.
 // Ao mudar qualquer arquivo, aumente a VERSAO para os celulares baixarem de novo.
-const VERSAO = 'editar-pdf-v7';
+const VERSAO = 'editar-pdf-v8';
 const ARQUIVOS = [
   './',
   'index.html',
   'manifest.webmanifest',
   'css/app.css',
+  'js/conteudo.js',
   'js/editor.js',
   'vendor/pdf-lib.min.js',
   'vendor/pdf.min.js',
