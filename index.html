@@ -18,15 +18,26 @@
     .pagina-edicao { position: relative; flex: 0 0 auto; margin: 0 auto; box-shadow: 0 2px 10px rgba(0, 0, 0, .18); background: #fff; }
     .pagina-edicao canvas { display: block; width: 100%; height: 100%; }
     .camada-texto { position: absolute; inset: 0; }
-    .trecho { position: absolute; white-space: pre; color: transparent; cursor: text; border-radius: 2px; outline-offset: 1px; }
+    .trecho { position: absolute; white-space: pre; cursor: text; border-radius: 2px; outline-offset: 1px; }
     .trecho:hover { outline: 1px dashed var(--acento); }
-    /* editado: cobre o texto antigo com a cor do fundo, como no PDF baixado */
-    .trecho.editando, .trecho.alterado { color: var(--cor); background: var(--fundo); }
+    /* capa: cobre o texto antigo com a cor do fundo, como no PDF baixado */
+    .capa { position: absolute; pointer-events: none; }
     .trecho.editando { outline: 2px solid var(--acento); }
     .trecho.alterado:not(.editando) { outline: 1px solid #1b7a3a; }
+    .alca { position: absolute; width: 28px; height: 28px; border-radius: 50%; background: var(--acento); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 16px; cursor: move; touch-action: none; user-select: none; box-shadow: 0 1px 4px rgba(0, 0, 0, .3); z-index: 2; }
     button:disabled { opacity: .5; cursor: default; }
     .zoom-botoes { display: flex; gap: 2px; }
     .zoom-botoes button { min-width: 36px; font-weight: 600; }
+
+    .barra-texto { position: fixed; left: 0; right: 0; bottom: 0; z-index: 10; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px; padding: 8px 10px; padding-bottom: max(8px, env(safe-area-inset-bottom)); background: var(--painel); border-top: 1px solid var(--borda); box-shadow: 0 -2px 10px rgba(0, 0, 0, .12); }
+    .barra-texto[hidden] { display: none; }
+    .barra-texto .grupo { display: flex; gap: 2px; align-items: center; }
+    .barra-texto button { min-width: 36px; }
+    .barra-texto button.ativo { background: var(--acento); border-color: var(--acento); color: #fff; }
+    .barra-texto select, .barra-texto input[type=number] { font: inherit; padding: 6px; border: 1px solid var(--borda); border-radius: 6px; background: #fff; color: var(--texto); }
+    .barra-texto input[type=number] { width: 58px; }
+    .barra-texto input[type=color] { width: 38px; height: 34px; padding: 2px; border: 1px solid var(--borda); border-radius: 6px; background: #fff; }
+    body.com-barra .paginas { padding-bottom: 140px; }
 
     @media (max-width: 700px) {
       .barra { flex-wrap: wrap; padding: 8px 10px; padding-top: max(8px, env(safe-area-inset-top)); gap: 6px; }
@@ -60,6 +71,35 @@
   <main id="paginas" class="paginas">
     <p class="vazio">O PDF é aberto no seu aparelho e não é enviado para nenhum lugar.</p>
   </main>
+
+  <!-- aparece ao tocar num texto -->
+  <div id="barra-texto" class="barra-texto" hidden>
+    <select data-ctl="familia" title="Fonte">
+      <option value="Helvetica">Arial / Helvetica</option>
+      <option value="Times">Times</option>
+      <option value="Courier">Courier</option>
+    </select>
+    <span class="grupo">
+      <button type="button" data-ctl="menor" title="Diminuir letra">A−</button>
+      <input type="number" data-ctl="tamanho" min="2" step="0.5" title="Tamanho da letra" inputmode="decimal">
+      <button type="button" data-ctl="maior" title="Aumentar letra">A+</button>
+    </span>
+    <span class="grupo">
+      <button type="button" data-ctl="negrito" title="Negrito"><b>N</b></button>
+      <button type="button" data-ctl="italico" title="Itálico"><i>I</i></button>
+      <input type="color" data-ctl="cor" title="Cor do texto">
+    </span>
+    <span class="grupo" title="Mover (ou arraste a alça ✥)">
+      <button type="button" data-mover="esq">←</button>
+      <button type="button" data-mover="cima">↑</button>
+      <button type="button" data-mover="baixo">↓</button>
+      <button type="button" data-mover="dir">→</button>
+    </span>
+    <span class="grupo">
+      <button type="button" data-ctl="restaurar" title="Voltar ao texto original">Restaurar</button>
+      <button type="button" data-ctl="pronto" class="principal">OK</button>
+    </span>
+  </div>
 
   <script src="vendor/pdf-lib.min.js"></script>
   <!-- o worker carregado como script deixa o pdf.js funcionar abrindo o arquivo direto (file://) -->

@@ -1,6 +1,7 @@
-// Edita o texto já escrito num PDF: clique no texto, digite o novo, baixe o PDF.
-// No PDF baixado o texto antigo é coberto com a cor do fundo e o novo é escrito
-// no mesmo lugar, tamanho e cor (fonte padrão parecida: sem/com serifa, negrito, itálico).
+// Edita o texto já escrito num PDF: toque no texto, digite o novo, ajuste fonte,
+// tamanho, cor e posição, e baixe o PDF.
+// No PDF baixado o texto antigo é coberto com a cor do fundo (parando antes de uma
+// linha/pontilhado logo abaixo dele, para não apagá-la) e o novo é escrito por cima.
 (function () {
   const { PDFDocument, StandardFonts, rgb } = PDFLib;
   pdfjsLib.GlobalWorkerOptions.workerSrc = 'vendor/pdf.worker.min.js';
@@ -10,13 +11,25 @@
   const status = document.getElementById('status');
   const botaoBaixar = document.querySelector('[data-acao="baixar"]');
   const botaoDesfazer = document.querySelector('[data-acao="desfazer"]');
+  const barraTexto = document.getElementById('barra-texto');
+  const ctl = Object.fromEntries([...barraTexto.querySelectorAll('[data-ctl]')].map((el) => [el.dataset.ctl, el]));
+
+  // Fontes padrão do PDF (as embutidas no arquivo costumam vir só com as letras usadas).
+  const FAMILIAS = {
+    Helvetica: { css: 'Helvetica, Arial, sans-serif', pdf: ['Helvetica', 'HelveticaBold', 'HelveticaOblique', 'HelveticaBoldOblique'] },
+    Times: { css: '"Times New Roman", Times, serif', pdf: ['TimesRoman', 'TimesRomanBold', 'TimesRomanItalic', 'TimesRomanBoldItalic'] },
+    Courier: { css: '"Courier New", Courier, monospace', pdf: ['Courier', 'CourierBold', 'CourierOblique', 'CourierBoldOblique'] },
+  };
 
   let original = null; // bytes do PDF aberto, nunca alterados
   let pdfAtual = null; // o mesmo PDF, lido pelo pdf.js para desenhar
   let zoom = 1;
   let nomeArquivo = 'documento';
   let trechos = []; // um por pedaço de texto do PDF
-  const edicoes = new Map(); // id do trecho -> texto novo
+  let selecionado = null;
+  // id do trecho -> { texto, familia, negrito, italico, tamanho, cor: [r, g, b], dx, dy }
+  // (dx/dy = deslocamento em pontos do PDF). O id é o mesmo a cada desenho.
+  const edicoes = new Map();
 
   // ---------- Abrir e desenhar ----------
 
@@ -41,16 +54,14 @@
     atualizarStatus(trechos.length ? undefined : 'Este PDF não tem texto editável (o texto pode estar como imagem).');
   }
 
-  // Desenha as páginas no zoom atual (zoom 1 = largura da tela). As edições são
-  // guardadas pelo id do trecho, que é o mesmo a cada desenho, e reaplicadas.
+  // Desenha as páginas no zoom atual (zoom 1 = largura da tela).
   async function desenhar() {
-    const pdf = pdfAtual;
-    document.activeElement?.blur?.();
+    desselecionar();
     area.innerHTML = '';
     trechos = [];
     const largura = Math.min(1100, area.clientWidth - 32) * zoom;
-    for (let n = 1; n <= pdf.numPages; n++) {
-      const page = await pdf.getPage(n);
+    for (let n = 1; n <= pdfAtual.numPages; n++) {
+      const page = await pdfAtual.getPage(n);
       const viewport = page.getViewport({ scale: largura / page.getViewport({ scale: 1 }).width });
       // celulares limitam o tamanho do canvas (~16 milhões de pixels)
       const dpr = Math.min(window.devicePixelRatio || 1, Math.sqrt(16e6 / (viewport.width * viewport.height)));
@@ -65,18 +76,17 @@
       camada.className = 'camada-texto';
       div.append(canvas, camada);
       area.append(div);
-      await page.render({ canvasContext: canvas.getContext('2d'), viewport, transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null }).promise;
+      await page.render({ canvasContext: canvas.getContext('2d', { willReadFrequently: true }), viewport, transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null }).promise;
 
       const { items, styles } = await page.getTextContent();
       for (const item of items) {
         if (!item.str.trim()) continue;
         const t = criarTrecho(n - 1, item, styles[item.fontName] || {}, page, viewport, canvas, dpr);
-        if (t) { trechos.push(t); camada.append(t.el); }
+        if (!t) continue;
+        trechos.push(t);
+        camada.append(t.capa, t.el);
+        aplicar(t);
       }
-    }
-    for (const [id, novo] of edicoes) {
-      trechos[id].el.textContent = novo;
-      trechos[id].el.classList.add('alterado');
     }
   }
 
@@ -86,34 +96,37 @@
     const tamanho = Math.hypot(c, d);
     const ascent = estilo.ascent || 0.8;
     const descent = estilo.descent || -0.2;
-    const fonte = descreverFonte(page, item.fontName, estilo);
 
-    // retângulo do texto em pontos do PDF (y para cima)
-    const pdfRet = { x, y: y + descent * tamanho, w: item.width || a * item.str.length * 0.5, h: (ascent - descent) * tamanho };
-    const [x1, y1, x2, y2] = viewport.convertToViewportRectangle([pdfRet.x, pdfRet.y, pdfRet.x + pdfRet.w, pdfRet.y + pdfRet.h]);
-    const tela = { left: Math.min(x1, x2), top: Math.min(y1, y2), width: Math.abs(x2 - x1), height: Math.abs(y2 - y1) };
-    const cores = amostrarCores(canvas, tela, dpr);
+    // retângulo do texto em pontos do PDF (y para cima) e na tela
+    const ret = { x, y: y + descent * tamanho, w: item.width || a * item.str.length * 0.5, h: (ascent - descent) * tamanho };
+    const tela = retanguloTela(viewport, ret);
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const cores = amostrarCores(ctx, canvas, tela, dpr);
 
-    const el = document.createElement('span');
-    el.className = 'trecho';
-    el.textContent = item.str;
-    el.spellcheck = false;
-    el.title = 'Clique para editar';
-    const px = tamanho * viewport.scale;
-    Object.assign(el.style, {
-      left: `${tela.left}px`, top: `${tela.top}px`, minWidth: `${tela.width}px`, height: `${tela.height}px`,
-      fontSize: `${px}px`, lineHeight: `${tela.height}px`, fontFamily: fonte.css,
-      fontWeight: fonte.negrito ? 'bold' : 'normal', fontStyle: fonte.italico ? 'italic' : 'normal',
-    });
-    el.style.setProperty('--fundo', css(cores.fundo));
-    el.style.setProperty('--cor', css(cores.texto));
-
-    const t = { id: trechos.length, pagina, original: item.str, x, y, tamanho, pdfRet, fonte, cores, el };
-    el.dataset.id = t.id;
+    const t = {
+      id: trechos.length, pagina, original: item.str, x, y, tamanho, ascent, descent, viewport,
+      fonte: descreverFonte(page, item.fontName, estilo), cores,
+      capaPdf: calcularCapa(ctx, canvas, dpr, viewport, y, tela, cores.fundo),
+    };
+    t.el = document.createElement('span');
+    t.el.className = 'trecho';
+    t.el.textContent = item.str;
+    t.el.spellcheck = false;
+    t.el.dataset.id = t.id;
+    t.capa = document.createElement('div');
+    t.capa.className = 'capa';
+    Object.assign(t.capa.style, posicao(retanguloTela(viewport, t.capaPdf)), { background: css(cores.fundo) });
     return t;
   }
 
-  // Fonte padrão mais parecida com a do PDF (as embutidas costumam vir incompletas).
+  function retanguloTela(viewport, r) {
+    const [x1, y1, x2, y2] = viewport.convertToViewportRectangle([r.x, r.y, r.x + r.w, r.y + r.h]);
+    return { left: Math.min(x1, x2), top: Math.min(y1, y2), width: Math.abs(x2 - x1), height: Math.abs(y2 - y1) };
+  }
+
+  const posicao = (r) => ({ left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` });
+
+  // Fonte padrão mais parecida com a do PDF.
   function descreverFonte(page, fontName, estilo) {
     let nome = '';
     try { nome = page.commonObjs.get(fontName)?.name || ''; } catch { /* fonte ainda não carregada */ }
@@ -121,16 +134,11 @@
     const italico = /italic|oblique/i.test(nome);
     const mono = estilo.fontFamily === 'monospace' || /mono|courier|consol/i.test(nome);
     const serifa = !mono && !/sans/i.test(nome) && (estilo.fontFamily === 'serif' || /times|serif|georgia|garamond|playfair|merriweather|lora|baskerville/i.test(nome));
-    const familia = mono ? 'Courier' : serifa ? 'Times' : 'Helvetica';
-    return {
-      negrito, italico, familia,
-      css: { Courier: '"Courier New", monospace', Times: '"Times New Roman", serif', Helvetica: 'Helvetica, Arial, sans-serif' }[familia],
-    };
+    return { familia: mono ? 'Courier' : serifa ? 'Times' : 'Helvetica', negrito, italico };
   }
 
   // Cor do fundo (borda em volta do texto) e do texto (pixel mais diferente do fundo).
-  function amostrarCores(canvas, r, dpr) {
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  function amostrarCores(ctx, canvas, r, dpr) {
     const pegar = (x, y) => {
       const px = Math.max(0, Math.min(canvas.width - 1, Math.round(x * dpr)));
       const py = Math.max(0, Math.min(canvas.height - 1, Math.round(y * dpr)));
@@ -149,11 +157,37 @@
     let texto = [0, 0, 0];
     let maior = -1;
     for (let i = 0; i < img.length; i += 4) {
-      const dist = Math.abs(img[i] - fundo[0]) + Math.abs(img[i + 1] - fundo[1]) + Math.abs(img[i + 2] - fundo[2]);
+      const dist = distancia(img, i, fundo);
       if (dist > maior) { maior = dist; texto = [img[i], img[i + 1], img[i + 2]]; }
     }
     return { fundo, texto };
   }
+
+  // Área que cobre o texto antigo. Se logo abaixo da linha de base houver uma
+  // linha/pontilhado (fileira de pixels que ocupa boa parte da largura), a
+  // cobertura para antes dela, para a linha continuar no PDF.
+  function calcularCapa(ctx, canvas, dpr, viewport, baseY, tela, fundo) {
+    const [, base] = viewport.convertToViewportPoint(0, baseY);
+    const x0 = Math.max(0, Math.round((tela.left - 4) * dpr));
+    const x1 = Math.min(canvas.width, Math.round((tela.left + tela.width + 4) * dpr));
+    const y0 = Math.max(0, Math.round((base + 1) * dpr));
+    const y1 = Math.min(canvas.height, Math.round((tela.top + tela.height + 3) * dpr));
+    let fim = tela.top + tela.height + 1;
+    if (x1 > x0 && y1 > y0) {
+      const w = x1 - x0;
+      const img = ctx.getImageData(x0, y0, w, y1 - y0).data;
+      for (let linha = 0; linha < y1 - y0; linha++) {
+        let n = 0;
+        for (let col = 0; col < w; col++) if (distancia(img, (linha * w + col) * 4, fundo) > 80) n++;
+        if (n / w > 0.4) { fim = (y0 + linha) / dpr - 0.3; break; }
+      }
+    }
+    const [ax, ay] = viewport.convertToPdfPoint(tela.left - 1, fim);
+    const [bx, by] = viewport.convertToPdfPoint(tela.left + tela.width + 1, tela.top - 1);
+    return { x: Math.min(ax, bx), y: Math.min(ay, by), w: Math.abs(bx - ax), h: Math.abs(by - ay) };
+  }
+
+  const distancia = (img, i, c) => Math.abs(img[i] - c[0]) + Math.abs(img[i + 1] - c[1]) + Math.abs(img[i + 2] - c[2]);
 
   function mediana(v) {
     const s = [...v].sort((p, q) => p - q);
@@ -161,52 +195,180 @@
   }
 
   const css = ([r, g, b]) => `rgb(${r}, ${g}, ${b})`;
+  const hex = (c) => `#${c.map((v) => v.toString(16).padStart(2, '0')).join('')}`;
+  const deHex = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+
+  // ---------- Estado de cada trecho ----------
+
+  function padrao(t) {
+    return { texto: t.original, ...t.fonte, tamanho: t.tamanho, cor: t.cores.texto, dx: 0, dy: 0 };
+  }
+
+  const estado = (t) => edicoes.get(t.id) ?? padrao(t);
+
+  function salvar(t, e) {
+    const p = padrao(t);
+    const igual = Object.keys(p).every((k) => String(p[k]) === String(e[k]));
+    if (igual) edicoes.delete(t.id);
+    else edicoes.set(t.id, e);
+    aplicar(t);
+    atualizarStatus();
+  }
+
+  // Mostra o trecho na tela como vai sair no PDF.
+  function aplicar(t) {
+    const e = estado(t);
+    const visivel = edicoes.has(t.id) || selecionado === t;
+    const [sx, sy] = t.viewport.convertToViewportPoint(t.x + e.dx, t.y + e.dy);
+    const px = e.tamanho * t.viewport.scale;
+    const altura = (t.ascent - t.descent) * px;
+    Object.assign(t.el.style, {
+      left: `${sx}px`, top: `${sy - t.ascent * px}px`, height: `${altura}px`, lineHeight: `${altura}px`,
+      fontSize: `${px}px`, fontFamily: FAMILIAS[e.familia].css,
+      fontWeight: e.negrito ? 'bold' : 'normal', fontStyle: e.italico ? 'italic' : 'normal',
+      color: visivel ? css(e.cor) : 'transparent',
+    });
+    if (document.activeElement !== t.el && t.el.textContent !== e.texto) t.el.textContent = e.texto;
+    t.el.classList.toggle('alterado', edicoes.has(t.id));
+    t.capa.hidden = !visivel;
+    if (selecionado === t) posicionarAlca();
+  }
+
+  // ---------- Seleção e barra de ferramentas ----------
+
+  let alca = null;
+
+  function selecionar(t) {
+    if (selecionado === t) return;
+    desselecionar();
+    selecionado = t;
+    t.antes = estado(t); // para o Esc voltar
+    t.el.contentEditable = 'plaintext-only';
+    t.el.classList.add('editando');
+    t.el.focus();
+    getSelection().selectAllChildren(t.el); // já dá para digitar por cima
+    alca = document.createElement('div');
+    alca.className = 'alca';
+    alca.textContent = '✥';
+    alca.title = 'Arraste para mover';
+    t.el.parentNode.append(alca);
+    aplicar(t);
+    mostrarBarra();
+  }
+
+  function desselecionar() {
+    const t = selecionado;
+    if (!t) return;
+    selecionado = null;
+    t.el.contentEditable = 'false';
+    t.el.classList.remove('editando');
+    alca?.remove();
+    alca = null;
+    barraTexto.hidden = true;
+    document.body.classList.remove('com-barra');
+    aplicar(t);
+  }
+
+  function posicionarAlca() {
+    const el = selecionado.el;
+    const esquerda = el.offsetLeft - 34;
+    alca.style.left = `${esquerda >= 0 ? esquerda : el.offsetLeft + el.offsetWidth + 6}px`;
+    alca.style.top = `${el.offsetTop + el.offsetHeight / 2 - 14}px`;
+  }
+
+  function mostrarBarra() {
+    const e = estado(selecionado);
+    ctl.familia.value = e.familia;
+    ctl.tamanho.value = Math.round(e.tamanho * 10) / 10;
+    ctl.negrito.classList.toggle('ativo', e.negrito);
+    ctl.italico.classList.toggle('ativo', e.italico);
+    ctl.cor.value = hex(e.cor);
+    barraTexto.hidden = false;
+    document.body.classList.add('com-barra');
+  }
+
+  function mudar(props) {
+    const t = selecionado;
+    if (!t) return;
+    salvar(t, { ...estado(t), texto: lerTexto(t), ...props });
+    mostrarBarra();
+  }
+
+  const lerTexto = (t) => t.el.textContent.replace(/\s*\n\s*/g, ' ');
+
+  // botões da barra não tiram o foco do texto (o teclado do celular continua aberto)
+  barraTexto.addEventListener('pointerdown', (e) => { if (e.target.closest('button')) e.preventDefault(); });
+
+  barraTexto.addEventListener('click', (e) => {
+    const botao = e.target.closest('button');
+    if (!botao || !selecionado) return;
+    const e0 = estado(selecionado);
+    const passo = 1; // pontos do PDF
+    const acoesBarra = {
+      menor: () => mudar({ tamanho: Math.max(2, Math.round((e0.tamanho - 0.5) * 10) / 10) }),
+      maior: () => mudar({ tamanho: Math.round((e0.tamanho + 0.5) * 10) / 10 }),
+      negrito: () => mudar({ negrito: !e0.negrito }),
+      italico: () => mudar({ italico: !e0.italico }),
+      esq: () => mudar({ dx: e0.dx - passo }),
+      dir: () => mudar({ dx: e0.dx + passo }),
+      cima: () => mudar({ dy: e0.dy + passo }),
+      baixo: () => mudar({ dy: e0.dy - passo }),
+      restaurar: () => { edicoes.delete(selecionado.id); selecionado.el.textContent = selecionado.original; aplicar(selecionado); atualizarStatus(); mostrarBarra(); },
+      pronto: () => desselecionar(),
+    };
+    acoesBarra[botao.dataset.ctl || botao.dataset.mover]?.();
+  });
+
+  ctl.familia.addEventListener('change', () => mudar({ familia: ctl.familia.value }));
+  ctl.tamanho.addEventListener('input', () => { if (Number(ctl.tamanho.value) >= 2) mudar({ tamanho: Number(ctl.tamanho.value) }); });
+  ctl.cor.addEventListener('input', () => mudar({ cor: deHex(ctl.cor.value) }));
 
   // ---------- Edição na tela ----------
 
   function trechoDe(el) {
-    return trechos[Number(el.closest('.trecho')?.dataset.id)];
+    return trechos[Number(el.closest?.('.trecho')?.dataset.id)];
   }
 
   area.addEventListener('click', (e) => {
-    const t = e.target.closest('.trecho') && trechoDe(e.target);
-    if (!t || t.el.isContentEditable) return;
-    t.el.contentEditable = 'plaintext-only';
-    t.el.classList.add('editando');
-    t.el.focus();
-    // seleciona tudo para já poder digitar por cima
-    const sel = getSelection();
-    sel.selectAllChildren(t.el);
-    t.antes = edicoes.get(t.id) ?? t.original; // para o Esc voltar
+    if (e.target.closest('.alca')) return;
+    const t = trechoDe(e.target);
+    if (t) selecionar(t);
+    else desselecionar();
   });
 
   area.addEventListener('keydown', (e) => {
-    const t = e.target.closest?.('.trecho') && trechoDe(e.target);
+    const t = trechoDe(e.target);
     if (!t) return;
-    if (e.key === 'Enter') { e.preventDefault(); t.el.blur(); }
-    if (e.key === 'Escape') { t.el.textContent = t.antes ?? t.original; registrar(t); t.el.blur(); }
+    if (e.key === 'Enter') { e.preventDefault(); desselecionar(); }
+    if (e.key === 'Escape') {
+      t.el.textContent = t.antes.texto;
+      salvar(t, t.antes);
+      desselecionar();
+    }
   });
 
   // grava a cada letra, para não depender de sair do campo (no celular nem sempre acontece)
-  function registrar(t) {
-    const novo = t.el.textContent.replace(/\s*\n\s*/g, ' ');
-    if (novo === t.original) edicoes.delete(t.id);
-    else edicoes.set(t.id, novo);
-    t.el.classList.toggle('alterado', edicoes.has(t.id));
-    atualizarStatus();
-  }
-
   area.addEventListener('input', (e) => {
-    const t = e.target.closest?.('.trecho') && trechoDe(e.target);
-    if (t) registrar(t);
+    const t = trechoDe(e.target);
+    if (t) salvar(t, { ...estado(t), texto: lerTexto(t) });
   });
 
-  area.addEventListener('focusout', (e) => {
-    const t = e.target.closest?.('.trecho') && trechoDe(e.target);
-    if (!t) return;
-    t.el.contentEditable = 'false';
-    t.el.classList.remove('editando');
-    registrar(t);
+  // arrastar a alça move o texto
+  area.addEventListener('pointerdown', (e) => {
+    if (!e.target.closest('.alca') || !selecionado) return;
+    e.preventDefault();
+    const t = selecionado;
+    const inicio = { x: e.clientX, y: e.clientY, ...estado(t) };
+    const escala = t.viewport.scale;
+    const mover = (ev) => {
+      mudar({ dx: inicio.dx + (ev.clientX - inicio.x) / escala, dy: inicio.dy - (ev.clientY - inicio.y) / escala });
+    };
+    const soltar = () => {
+      window.removeEventListener('pointermove', mover);
+      window.removeEventListener('pointerup', soltar);
+    };
+    window.addEventListener('pointermove', mover);
+    window.addEventListener('pointerup', soltar);
   });
 
   function atualizarStatus(msg) {
@@ -221,27 +383,23 @@
     const pages = doc.getPages();
     const fontes = {};
     const fonte = async ({ familia, negrito, italico }) => {
-      const nome = {
-        Helvetica: ['Helvetica', 'HelveticaBold', 'HelveticaOblique', 'HelveticaBoldOblique'],
-        Times: ['TimesRoman', 'TimesRomanBold', 'TimesRomanItalic', 'TimesRomanBoldItalic'],
-        Courier: ['Courier', 'CourierBold', 'CourierOblique', 'CourierBoldOblique'],
-      }[familia][(negrito ? 1 : 0) + (italico ? 2 : 0)];
+      const nome = FAMILIAS[familia].pdf[(negrito ? 1 : 0) + (italico ? 2 : 0)];
       fontes[nome] ??= await doc.embedFont(StandardFonts[nome]);
       return fontes[nome];
     };
     const cor = (c) => rgb(c[0] / 255, c[1] / 255, c[2] / 255);
 
-    for (const [id, novo] of edicoes) {
+    for (const [id, e] of edicoes) {
       const t = trechos[id];
       const page = pages[t.pagina];
-      const r = t.pdfRet;
-      page.drawRectangle({ x: r.x - 1, y: r.y - 1, width: r.w + 2, height: r.h + 2, color: cor(t.cores.fundo) });
-      if (!novo.trim()) continue;
-      const f = await fonte(t.fonte);
+      const r = t.capaPdf;
+      page.drawRectangle({ x: r.x, y: r.y, width: r.w, height: r.h, color: cor(t.cores.fundo) });
+      if (!e.texto.trim()) continue;
+      const f = await fonte(e);
       try {
-        page.drawText(novo, { x: t.x, y: t.y, size: t.tamanho, font: f, color: cor(t.cores.texto) });
+        page.drawText(e.texto, { x: t.x + e.dx, y: t.y + e.dy, size: e.tamanho, font: f, color: cor(e.cor) });
       } catch {
-        throw new Error(`O texto "${novo}" tem caractere que a fonte padrão não suporta (ex.: emoji).`);
+        throw new Error(`O texto "${e.texto}" tem caractere que a fonte padrão não suporta (ex.: emoji).`);
       }
     }
     return doc.save();
@@ -256,16 +414,14 @@
     },
     desfazer() {
       if (!confirm('Desfazer todas as alterações?')) return;
-      for (const id of edicoes.keys()) {
-        const t = trechos[id];
-        t.el.textContent = t.original;
-        t.el.classList.remove('alterado');
-      }
+      desselecionar();
+      const alterados = [...edicoes.keys()].map((id) => trechos[id]);
       edicoes.clear();
+      alterados.forEach(aplicar);
       atualizarStatus();
     },
     async baixar() {
-      document.activeElement?.blur(); // grava a edição em andamento
+      desselecionar();
       let bytes;
       try {
         bytes = await gerar();
@@ -293,6 +449,10 @@
     mais() { mudarZoom(+1); },
     menos() { mudarZoom(-1); },
   };
+  document.querySelector('.acoes').addEventListener('click', (e) => {
+    const botao = e.target.closest('[data-acao]');
+    if (botao && !botao.disabled) acoes[botao.dataset.acao]();
+  });
 
   const ZOOMS = [1, 1.5, 2, 3];
   async function mudarZoom(passo) {
@@ -307,10 +467,6 @@
     area.scrollLeft = cx * area.scrollWidth - area.clientWidth / 2;
     area.scrollTop = cy * area.scrollHeight - area.clientHeight / 2;
   }
-  document.querySelector('.acoes').addEventListener('click', (e) => {
-    const botao = e.target.closest('[data-acao]');
-    if (botao && !botao.disabled) acoes[botao.dataset.acao]();
-  });
 
   arquivo.addEventListener('change', async (e) => {
     const f = e.target.files[0];
