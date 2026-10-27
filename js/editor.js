@@ -11,6 +11,7 @@
   const status = document.getElementById('status');
   const botaoBaixar = document.querySelector('[data-acao="baixar"]');
   const botaoDesfazer = document.querySelector('[data-acao="desfazer"]');
+  const botaoSalvar = document.querySelector('[data-acao="salvar"]');
   const barraTexto = document.getElementById('barra-texto');
   const ctl = Object.fromEntries([...barraTexto.querySelectorAll('[data-ctl]')].map((el) => [el.dataset.ctl, el]));
 
@@ -33,8 +34,10 @@
 
   // ---------- Abrir e desenhar ----------
 
-  async function abrir(bytes, nome) {
+  // lista: edições vindas de um arquivo .edicao.json (senão, as lembradas deste PDF)
+  async function abrir(bytes, nome, lista = null) {
     original = bytes;
+    idPdf = impressao(bytes);
     nomeArquivo = nome.replace(/\.pdf$/i, '');
     edicoes.clear();
     trechos = [];
@@ -51,7 +54,74 @@
     zoom = 1;
     await desenhar();
     botaoBaixar.disabled = false;
-    atualizarStatus(trechos.length ? undefined : 'Este PDF não tem texto editável (o texto pode estar como imagem).');
+    botaoSalvar.disabled = false;
+    if (!trechos.length) {
+      atualizarStatus('Este PDF não tem texto editável (o texto pode estar como imagem).');
+      return;
+    }
+    const n = restaurarEdicoes(lista ?? lembradas());
+    atualizarStatus(n ? `${n} alteração(ões) anterior(es) restaurada(s). "Desfazer" começa do zero.` : undefined);
+    lembrar();
+  }
+
+  // ---------- Memória das edições ----------
+  // As alterações de cada PDF ficam guardadas no próprio aparelho (só os textos e
+  // ajustes, não o PDF). Ao abrir o mesmo PDF de novo, elas voltam sozinhas.
+
+  const MEMORIA = 'editar-pdf:';
+  let idPdf = null;
+
+  // identifica o PDF pelo conteúdo (FNV-1a), não pelo nome do arquivo
+  function impressao(bytes) {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < bytes.length; i++) { h ^= bytes[i]; h = Math.imul(h, 0x01000193); }
+    return `${(h >>> 0).toString(16)}-${bytes.length}`;
+  }
+
+  function listaEdicoes() {
+    return [...edicoes].map(([id, estado]) => ({ id, pagina: trechos[id].pagina, original: trechos[id].original, estado }));
+  }
+
+  function lembrar() {
+    try {
+      if (edicoes.size) localStorage.setItem(MEMORIA + idPdf, JSON.stringify({ nome: nomeArquivo, quando: Date.now(), edicoes: listaEdicoes() }));
+      else localStorage.removeItem(MEMORIA + idPdf);
+    } catch { /* sem armazenamento (aba anônima, cheio…) */ }
+  }
+
+  function lembradas() {
+    try { return JSON.parse(localStorage.getItem(MEMORIA + idPdf))?.edicoes || []; } catch { return []; }
+  }
+
+  // Liga cada edição ao trecho certo: pelo id, conferindo o texto original;
+  // se não bater, procura o mesmo texto na mesma página.
+  function restaurarEdicoes(lista) {
+    const usados = new Set();
+    for (const s of lista) {
+      let t = trechos[s.id];
+      if (!t || t.original !== s.original || usados.has(t.id)) {
+        t = trechos.find((x) => x.pagina === s.pagina && x.original === s.original && !usados.has(x.id));
+      }
+      if (!t) continue;
+      usados.add(t.id);
+      edicoes.set(t.id, s.estado);
+      aplicar(t);
+    }
+    return usados.size;
+  }
+
+  // Arquivo .edicao.json: o PDF original + as alterações, para continuar em outro aparelho.
+  function paraBase64(bytes) {
+    let s = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    return btoa(s);
+  }
+
+  function deBase64(b64) {
+    const s = atob(b64);
+    const bytes = new Uint8Array(s.length);
+    for (let i = 0; i < s.length; i++) bytes[i] = s.charCodeAt(i);
+    return bytes;
   }
 
   // Desenha as páginas no zoom atual (zoom 1 = largura da tela).
@@ -76,17 +146,27 @@
       camada.className = 'camada-texto';
       div.append(canvas, camada);
       area.append(div);
-      await page.render({ canvasContext: canvas.getContext('2d', { willReadFrequently: true }), viewport, transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null }).promise;
+      await page.render({ canvasContext: canvas.getContext('2d'), viewport, transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null }).promise;
+
+      // Cópia invisível em alta resolução (~4 px por ponto do PDF) só para medir
+      // fundo, cor do texto e bordas: na tela uma borda fina tem menos de 1 px e
+      // sai mais clara e grossa do que é. Descartada depois da página.
+      const fator = Math.max(dpr, Math.min(4 / viewport.scale, Math.sqrt(16e6 / (viewport.width * viewport.height))));
+      const analise = document.createElement('canvas');
+      analise.width = Math.floor(viewport.width * fator);
+      analise.height = Math.floor(viewport.height * fator);
+      await page.render({ canvasContext: analise.getContext('2d', { willReadFrequently: true }), viewport, transform: [fator, 0, 0, fator, 0, 0] }).promise;
 
       const { items, styles } = await page.getTextContent();
       for (const item of items) {
         if (!item.str.trim()) continue;
-        const t = criarTrecho(n - 1, item, styles[item.fontName] || {}, page, viewport, canvas, dpr);
+        const t = criarTrecho(n - 1, item, styles[item.fontName] || {}, page, viewport, analise, fator);
         if (!t) continue;
         trechos.push(t);
         camada.append(t.capa, t.el);
         aplicar(t);
       }
+      analise.width = analise.height = 0; // libera a memória (importante no celular)
     }
   }
 
@@ -113,9 +193,17 @@
     t.el.textContent = item.str;
     t.el.spellcheck = false;
     t.el.dataset.id = t.id;
+    const capaTela = retanguloTela(viewport, t.capaPdf);
+    t.linhas = bordasVerticais(ctx, canvas, dpr, viewport, capaTela, cores.fundo);
     t.capa = document.createElement('div');
     t.capa.className = 'capa';
-    Object.assign(t.capa.style, posicao(retanguloTela(viewport, t.capaPdf)), { background: css(cores.fundo) });
+    Object.assign(t.capa.style, posicao(capaTela), { background: css(cores.fundo) });
+    for (const l of t.linhas) {
+      const borda = document.createElement('div');
+      const r = retanguloTela(viewport, { x: l.x, y: t.capaPdf.y, w: l.w, h: t.capaPdf.h });
+      Object.assign(borda.style, { position: 'absolute', left: `${r.left - capaTela.left}px`, top: 0, width: `${r.width}px`, height: '100%', background: css(l.cor) });
+      t.capa.append(borda);
+    }
     return t;
   }
 
@@ -200,6 +288,57 @@
     const [ax, ay] = viewport.convertToPdfPoint(tela.left - 0.5, fim);
     const [bx, by] = viewport.convertToPdfPoint(tela.left + tela.width + 0.5, inicio);
     return { x: Math.min(ax, bx), y: Math.min(ay, by), w: Math.abs(bx - ax), h: Math.abs(by - ay) };
+  }
+
+  // Bordas verticais (de tabela) que atravessam a área coberta: colunas de pixels
+  // que continuam ACIMA e ABAIXO da cobertura e ocupam quase toda a altura dela.
+  // (Traço de letra, como a perna do "1", não continua fora do texto.) Elas são
+  // redesenhadas por cima da cobertura, para a tabela não ficar com a linha quebrada.
+  // Retorna [{ x, w (pontos do PDF), cor }].
+  function bordasVerticais(ctx, canvas, dpr, viewport, capa, fundo) {
+    const x0 = Math.max(0, Math.floor((capa.left - 1) * dpr));
+    const x1 = Math.min(canvas.width, Math.ceil((capa.left + capa.width + 1) * dpr));
+    const yTopo = Math.max(0, Math.floor((capa.top - 3) * dpr));
+    const yBase = Math.min(canvas.height, Math.ceil((capa.top + capa.height + 3) * dpr));
+    const w = x1 - x0;
+    const h = yBase - yTopo;
+    if (w <= 0 || h <= 0) return [];
+    const img = ctx.getImageData(x0, yTopo, w, h).data;
+    const dentroDe = Math.round(capa.top * dpr) - yTopo;
+    const dentroAte = Math.round((capa.top + capa.height) * dpr) - yTopo;
+    const tinta = (col, lin) => distancia(img, (lin * w + col) * 4, fundo) > 80;
+
+    const colunas = [];
+    for (let col = 0; col < w; col++) {
+      // fora da cobertura: 1–2 px acima e abaixo dela
+      const acima = [dentroDe - 1, dentroDe - 2].some((l) => l >= 0 && tinta(col, l));
+      const abaixo = [dentroAte + 1, dentroAte + 2].some((l) => l < h && tinta(col, l));
+      if (!acima || !abaixo) continue;
+      let n = 0;
+      for (let lin = Math.max(0, dentroDe); lin < Math.min(h, dentroAte); lin++) if (tinta(col, lin)) n++;
+      if (n / Math.max(1, dentroAte - dentroDe) < 0.6) continue;
+      const i = ((dentroDe - 2 >= 0 ? dentroDe - 2 : 0) * w + col) * 4;
+      colunas.push({ col, cor: [img[i], img[i + 1], img[i + 2]], forca: distancia(img, i, fundo) });
+    }
+
+    // junta colunas vizinhas numa linha só
+    const linhas = [];
+    for (const c of colunas) {
+      const ult = linhas[linhas.length - 1];
+      if (ult && c.col === ult.cols[ult.cols.length - 1].col + 1) ult.cols.push(c); else linhas.push({ cols: [c] });
+    }
+    return linhas.map(({ cols }) => {
+      // cor: a mais escura (o centro da linha). Espessura e centro pesados pela
+      // intensidade: as colunas suavizadas das bordas contam só em parte, senão a
+      // linha redesenhada sai mais grossa que a original.
+      const centro = cols.reduce((a, b) => (a.forca >= b.forca ? a : b));
+      const soma = cols.reduce((s, c) => s + c.forca, 0);
+      const largura = Math.max(0.5, soma / centro.forca);
+      const meio = cols.reduce((s, c) => s + (c.col + 0.5) * c.forca, 0) / soma;
+      const [ax] = viewport.convertToPdfPoint((x0 + meio - largura / 2) / dpr, 0);
+      const [bx] = viewport.convertToPdfPoint((x0 + meio + largura / 2) / dpr, 0);
+      return { x: Math.min(ax, bx), w: Math.abs(bx - ax), cor: centro.cor };
+    });
   }
 
   const distancia = (img, i, c) => Math.abs(img[i] - c[0]) + Math.abs(img[i + 1] - c[1]) + Math.abs(img[i + 2] - c[2]);
@@ -381,7 +520,9 @@
     window.addEventListener('pointerup', soltar);
   });
 
+  // msg vazio = chamada depois de uma alteração: também guarda na memória
   function atualizarStatus(msg) {
+    if (msg === undefined && idPdf && trechos.length) lembrar();
     botaoDesfazer.disabled = !edicoes.size;
     status.textContent = msg ?? (edicoes.size ? `${edicoes.size} texto(s) alterado(s)` : 'Toque/clique em um texto para editar.');
   }
@@ -404,6 +545,7 @@
       const page = pages[t.pagina];
       const r = t.capaPdf;
       page.drawRectangle({ x: r.x, y: r.y, width: r.w, height: r.h, color: cor(t.cores.fundo) });
+      for (const l of t.linhas) page.drawRectangle({ x: l.x, y: r.y, width: l.w, height: r.h, color: cor(l.cor) });
       if (!e.texto.trim()) continue;
       const f = await fonte(e);
       try {
@@ -419,7 +561,7 @@
 
   const acoes = {
     abrir() {
-      if (edicoes.size && !confirm('Abrir outro PDF? As alterações não baixadas serão perdidas.')) return;
+      desselecionar(); // as alterações já estão guardadas na memória
       arquivo.click();
     },
     desfazer() {
@@ -439,22 +581,12 @@
         alert(`Não foi possível gerar o PDF: ${e.message}`);
         return;
       }
-      const nome = `${nomeArquivo}-editado.pdf`;
-      // no celular abre o compartilhar (WhatsApp, salvar em Arquivos…); no computador baixa
-      const pdf = new File([bytes], nome, { type: 'application/pdf' });
-      if (matchMedia('(pointer: coarse)').matches && navigator.canShare?.({ files: [pdf] })) {
-        try {
-          await navigator.share({ files: [pdf], title: nome });
-          return;
-        } catch (e) {
-          if (e.name === 'AbortError') return; // usuário fechou o compartilhar
-        }
-      }
-      const link = document.createElement('a');
-      link.href = URL.createObjectURL(pdf);
-      link.download = nome;
-      link.click();
-      setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+      await entregar(new File([bytes], `${nomeArquivo}-editado.pdf`, { type: 'application/pdf' }));
+    },
+    async salvar() {
+      desselecionar();
+      const dados = { tipo: 'editar-pdf', versao: 1, nome: nomeArquivo, pdf: paraBase64(original), edicoes: listaEdicoes() };
+      await entregar(new File([JSON.stringify(dados)], `${nomeArquivo}.edicao.json`, { type: 'application/json' }));
     },
     mais() { mudarZoom(+1); },
     menos() { mudarZoom(-1); },
@@ -478,11 +610,41 @@
     area.scrollTop = cy * area.scrollHeight - area.clientHeight / 2;
   }
 
+  // No celular abre o compartilhar (WhatsApp, salvar em Arquivos…); no computador baixa.
+  async function entregar(arquivoSaida) {
+    if (matchMedia('(pointer: coarse)').matches && navigator.canShare?.({ files: [arquivoSaida] })) {
+      try {
+        await navigator.share({ files: [arquivoSaida], title: arquivoSaida.name });
+        return;
+      } catch (e) {
+        if (e.name === 'AbortError') return; // usuário fechou o compartilhar
+      }
+    }
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(arquivoSaida);
+    link.download = arquivoSaida.name;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+  }
+
+  // Abrir aceita o PDF ou um .edicao.json salvo por "Salvar edição".
   arquivo.addEventListener('change', async (e) => {
     const f = e.target.files[0];
     e.target.value = '';
-    if (f) abrir(new Uint8Array(await f.arrayBuffer()), f.name);
+    if (!f) return;
+    const bytes = new Uint8Array(await f.arrayBuffer());
+    if (/\.json$/i.test(f.name) || f.type === 'application/json') {
+      let dados;
+      try {
+        dados = JSON.parse(new TextDecoder().decode(bytes));
+        if (dados.tipo !== 'editar-pdf') throw new Error();
+      } catch {
+        atualizarStatus('Este arquivo não é uma edição salva por este app.');
+        return;
+      }
+      abrir(deBase64(dados.pdf), `${dados.nome}.pdf`, dados.edicoes);
+      return;
+    }
+    abrir(bytes, f.name);
   });
-
-  window.addEventListener('beforeunload', (e) => { if (edicoes.size) e.preventDefault(); });
 })();

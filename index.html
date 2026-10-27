@@ -26,6 +26,7 @@
     .trecho.alterado:not(.editando) { outline: 1px solid #1b7a3a; }
     .alca { position: absolute; width: 28px; height: 28px; border-radius: 50%; background: var(--acento); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 16px; cursor: move; touch-action: none; user-select: none; box-shadow: 0 1px 4px rgba(0, 0, 0, .3); z-index: 2; }
     button:disabled { opacity: .5; cursor: default; }
+    .curto { display: none; }
     .zoom-botoes { display: flex; gap: 2px; }
     .zoom-botoes button { min-width: 36px; font-weight: 600; }
 
@@ -46,6 +47,7 @@
       .acoes { flex: 1; flex-wrap: nowrap; justify-content: space-between; gap: 4px; }
       .acoes button { padding: 9px 10px; }
       .longo { display: none; }
+      .curto { display: inline; }
       .paginas { padding: 8px; padding-bottom: max(8px, env(safe-area-inset-bottom)); }
       .trecho:hover { outline: none; }
       .trecho { outline: 1px dotted rgba(31, 95, 191, .35); } /* no toque não há hover: mostra o que dá para tocar */
@@ -62,9 +64,10 @@
         <button type="button" data-acao="menos" title="Diminuir">−</button>
         <button type="button" data-acao="mais" title="Aumentar">+</button>
       </span>
-      <button type="button" data-acao="desfazer" title="Desfazer tudo" disabled>Desfazer<span class="longo"> tudo</span></button>
+      <button type="button" data-acao="desfazer" title="Desfazer tudo" disabled><span class="longo">Desfazer tudo</span><span class="curto">↺</span></button>
+      <button type="button" data-acao="salvar" title="Salvar a edição (PDF + alterações) para continuar depois ou em outro aparelho" disabled>Salvar<span class="longo"> edição</span></button>
       <button type="button" data-acao="baixar" class="principal" disabled>Baixar<span class="longo"> PDF editado</span></button>
-      <input type="file" id="arquivo" accept=".pdf,application/pdf" hidden>
+      <input type="file" id="arquivo" accept=".pdf,application/pdf,.json,application/json" hidden>
     </div>
   </header>
 

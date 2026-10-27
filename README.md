@@ -9,7 +9,18 @@ e não é enviado para lugar nenhum.
 1. Abra `index.html` no Chrome ou no Edge e clique em **Abrir PDF…**.
 2. Clique no texto que quer mudar, apague e digite o novo.
    **Enter** confirma, **Esc** cancela. Texto alterado fica com contorno verde.
+   A barra que aparece embaixo muda fonte, tamanho, negrito/itálico e cor, e
+   move o texto (setas ou arrastando a alça ✥).
 3. **Baixar PDF editado** gera `<nome>-editado.pdf`. O arquivo original não é alterado.
+
+## Continuar depois
+
+- **Automático:** as alterações ficam guardadas no aparelho. Abrindo o mesmo PDF
+  de novo (mesmo conteúdo, o nome não importa), elas voltam sozinhas.
+  **Desfazer** (↺ no celular) apaga as alterações e essa memória.
+- **Salvar edição** baixa `<nome>.edicao.json` com o PDF original e as alterações.
+  Abra esse arquivo pelo **Abrir** em qualquer aparelho para continuar. Ele
+  contém o PDF inteiro: trate como o próprio documento.
 
 ## No celular (app instalável)
 
@@ -31,7 +42,10 @@ celulares continuam com a versão antiga guardada.
 ## Como funciona
 
 No PDF baixado, o texto antigo é coberto com a cor do fundo e o novo é escrito
-no mesmo lugar, tamanho e cor. A fonte é a padrão mais parecida (sem serifa,
+no mesmo lugar, tamanho e cor. A cor do fundo é a mais frequente dentro do
+retângulo do texto; linhas/pontilhados logo abaixo ou acima não são cobertos, e
+bordas verticais de tabela que atravessam o texto são redesenhadas por cima. As
+medições são feitas numa cópia da página em alta resolução (~4 px por ponto). A fonte é a padrão mais parecida (sem serifa,
 com serifa ou monoespaçada; negrito/itálico), porque as fontes embutidas no
 PDF costumam vir só com as letras usadas.
 
