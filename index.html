@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Editar PDF</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="theme-color" content="#1f5fbf">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Editar PDF">
+  <link rel="stylesheet" href="css/app.css">
+  <style>
+    .status { flex: 1; color: var(--suave); font-size: 13px; }
+    .paginas { flex: 1; overflow: auto; padding: 16px; display: flex; flex-direction: column; align-items: flex-start; gap: 16px; -webkit-overflow-scrolling: touch; }
+    .vazio { margin: auto; color: var(--suave); text-align: center; }
+    .pagina-edicao { position: relative; flex: 0 0 auto; margin: 0 auto; box-shadow: 0 2px 10px rgba(0, 0, 0, .18); background: #fff; }
+    .pagina-edicao canvas { display: block; width: 100%; height: 100%; }
+    .camada-texto { position: absolute; inset: 0; }
+    .trecho { position: absolute; white-space: pre; color: transparent; cursor: text; border-radius: 2px; outline-offset: 1px; }
+    .trecho:hover { outline: 1px dashed var(--acento); }
+    /* editado: cobre o texto antigo com a cor do fundo, como no PDF baixado */
+    .trecho.editando, .trecho.alterado { color: var(--cor); background: var(--fundo); }
+    .trecho.editando { outline: 2px solid var(--acento); }
+    .trecho.alterado:not(.editando) { outline: 1px solid #1b7a3a; }
+    button:disabled { opacity: .5; cursor: default; }
+    .zoom-botoes { display: flex; gap: 2px; }
+    .zoom-botoes button { min-width: 36px; font-weight: 600; }
+
+    @media (max-width: 700px) {
+      .barra { flex-wrap: wrap; padding: 8px 10px; padding-top: max(8px, env(safe-area-inset-top)); gap: 6px; }
+      .barra h1 { display: none; }
+      .status { order: 3; flex-basis: 100%; font-size: 12px; }
+      .acoes { flex: 1; flex-wrap: nowrap; justify-content: space-between; gap: 4px; }
+      .acoes button { padding: 9px 10px; }
+      .longo { display: none; }
+      .paginas { padding: 8px; padding-bottom: max(8px, env(safe-area-inset-bottom)); }
+      .trecho:hover { outline: none; }
+      .trecho { outline: 1px dotted rgba(31, 95, 191, .35); } /* no toque não há hover: mostra o que dá para tocar */
+    }
+  </style>
+</head>
+<body>
+  <header class="barra">
+    <h1>Editar PDF</h1>
+    <span id="status" class="status">Abra um PDF e toque no texto que quer mudar.</span>
+    <div class="acoes">
+      <button type="button" data-acao="abrir">Abrir<span class="longo"> PDF…</span></button>
+      <span class="zoom-botoes">
+        <button type="button" data-acao="menos" title="Diminuir">−</button>
+        <button type="button" data-acao="mais" title="Aumentar">+</button>
+      </span>
+      <button type="button" data-acao="desfazer" title="Desfazer tudo" disabled>Desfazer<span class="longo"> tudo</span></button>
+      <button type="button" data-acao="baixar" class="principal" disabled>Baixar<span class="longo"> PDF editado</span></button>
+      <input type="file" id="arquivo" accept=".pdf,application/pdf" hidden>
+    </div>
+  </header>
+
+  <main id="paginas" class="paginas">
+    <p class="vazio">O PDF é aberto no seu aparelho e não é enviado para nenhum lugar.</p>
+  </main>
+
+  <script src="vendor/pdf-lib.min.js"></script>
+  <!-- o worker carregado como script deixa o pdf.js funcionar abrindo o arquivo direto (file://) -->
+  <script src="vendor/pdf.min.js"></script>
+  <script src="vendor/pdf.worker.min.js"></script>
+  <script src="js/editor.js"></script>
+  <script>
+    // app instalável e offline (só funciona em https ou localhost, não em file://)
+    if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js');
+  </script>
+</body>
+</html>

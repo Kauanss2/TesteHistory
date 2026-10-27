@@ -1,0 +1,3 @@
+# PDFs nunca vão para o repositório (o app edita no aparelho)
+*.pdf
+*.PDF
