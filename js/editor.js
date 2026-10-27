@@ -106,7 +106,7 @@
     const t = {
       id: trechos.length, pagina, original: item.str, x, y, tamanho, ascent, descent, viewport,
       fonte: descreverFonte(page, item.fontName, estilo), cores,
-      capaPdf: calcularCapa(ctx, canvas, dpr, viewport, y, tela, cores.fundo),
+      capaPdf: calcularCapa(ctx, canvas, dpr, viewport, y, tela, cores.fundo, tamanho * viewport.scale),
     };
     t.el = document.createElement('span');
     t.el.className = 'trecho';
@@ -137,23 +137,29 @@
     return { familia: mono ? 'Courier' : serifa ? 'Times' : 'Helvetica', negrito, italico };
   }
 
-  // Cor do fundo (borda em volta do texto) e do texto (pixel mais diferente do fundo).
+  // Cor do fundo e do texto. O fundo é a cor que MAIS aparece dentro do retângulo
+  // do texto (os espaços entre as letras): é exatamente o que está embaixo dele.
+  // Amostrar em volta não serve: numa tabela os pontos caem nas bordas das células,
+  // que na tela saem cinza (suavizadas), e o fundo virava cinza.
+  // O texto é o pixel mais diferente do fundo.
   function amostrarCores(ctx, canvas, r, dpr) {
-    const pegar = (x, y) => {
-      const px = Math.max(0, Math.min(canvas.width - 1, Math.round(x * dpr)));
-      const py = Math.max(0, Math.min(canvas.height - 1, Math.round(y * dpr)));
-      return ctx.getImageData(px, py, 1, 1).data;
-    };
-    const borda = [];
-    for (let i = 0; i <= 10; i++) {
-      const x = r.left - 2 + (r.width + 4) * (i / 10);
-      borda.push(pegar(x, r.top - 2), pegar(x, r.top + r.height + 2));
+    const x0 = Math.max(0, Math.round(r.left * dpr));
+    const y0 = Math.max(0, Math.round(r.top * dpr));
+    const w = Math.max(1, Math.min(canvas.width - x0, Math.round(r.width * dpr)));
+    const h = Math.max(1, Math.min(canvas.height - y0, Math.round(r.height * dpr)));
+    const img = ctx.getImageData(x0, y0, w, h).data;
+    const grupos = new Map(); // cor arredondada -> { n, soma }
+    for (let i = 0; i < img.length; i += 4) {
+      const chave = (img[i] >> 3) << 10 | (img[i + 1] >> 3) << 5 | (img[i + 2] >> 3);
+      const g = grupos.get(chave) || { n: 0, soma: [0, 0, 0] };
+      g.n++;
+      g.soma[0] += img[i]; g.soma[1] += img[i + 1]; g.soma[2] += img[i + 2];
+      grupos.set(chave, g);
     }
-    borda.push(pegar(r.left - 3, r.top + r.height / 2), pegar(r.left + r.width + 3, r.top + r.height / 2));
-    const fundo = [0, 1, 2].map((k) => mediana(borda.map((p) => p[k])));
+    let maisComum = { n: 0, soma: [255, 255, 255] };
+    for (const g of grupos.values()) if (g.n > maisComum.n) maisComum = g;
+    const fundo = maisComum.soma.map((v) => Math.round(v / (maisComum.n || 1)));
 
-    const img = ctx.getImageData(Math.round(r.left * dpr), Math.round(r.top * dpr),
-      Math.max(1, Math.round(r.width * dpr)), Math.max(1, Math.round(r.height * dpr))).data;
     let texto = [0, 0, 0];
     let maior = -1;
     for (let i = 0; i < img.length; i += 4) {
@@ -163,36 +169,40 @@
     return { fundo, texto };
   }
 
-  // Área que cobre o texto antigo. Se logo abaixo da linha de base houver uma
-  // linha/pontilhado (fileira de pixels que ocupa boa parte da largura), a
-  // cobertura para antes dela, para a linha continuar no PDF.
-  function calcularCapa(ctx, canvas, dpr, viewport, baseY, tela, fundo) {
+  // Área que cobre o texto antigo. Se logo abaixo da linha de base (ou acima do
+  // topo das letras) houver uma linha/pontilhado/borda de tabela — fileira de
+  // pixels que ocupa boa parte da largura —, a cobertura para antes dela, para a
+  // linha continuar no PDF.
+  function calcularCapa(ctx, canvas, dpr, viewport, baseY, tela, fundo, px) {
     const [, base] = viewport.convertToViewportPoint(0, baseY);
     const x0 = Math.max(0, Math.round((tela.left - 4) * dpr));
     const x1 = Math.min(canvas.width, Math.round((tela.left + tela.width + 4) * dpr));
-    const y0 = Math.max(0, Math.round((base + 1) * dpr));
-    const y1 = Math.min(canvas.height, Math.round((tela.top + tela.height + 3) * dpr));
-    let fim = tela.top + tela.height + 1;
-    if (x1 > x0 && y1 > y0) {
-      const w = x1 - x0;
-      const img = ctx.getImageData(x0, y0, w, y1 - y0).data;
-      for (let linha = 0; linha < y1 - y0; linha++) {
-        let n = 0;
-        for (let col = 0; col < w; col++) if (distancia(img, (linha * w + col) * 4, fundo) > 80) n++;
-        if (n / w > 0.4) { fim = (y0 + linha) / dpr - 0.3; break; }
-      }
+    const w = x1 - x0;
+    const ehLinha = (yTela) => {
+      const y = Math.round(yTela * dpr);
+      if (w <= 0 || y < 0 || y >= canvas.height) return false;
+      const img = ctx.getImageData(x0, y, w, 1).data;
+      let n = 0;
+      for (let col = 0; col < w; col++) if (distancia(img, col * 4, fundo) > 80) n++;
+      return n / w > 0.4;
+    };
+    const passo = 1 / dpr;
+    // para baixo, a partir de logo abaixo da linha de base
+    let fim = tela.top + tela.height + 0.5;
+    for (let y = base + 1; y <= tela.top + tela.height + 3; y += passo) {
+      if (ehLinha(y)) { fim = y - 0.3; break; }
     }
-    const [ax, ay] = viewport.convertToPdfPoint(tela.left - 1, fim);
-    const [bx, by] = viewport.convertToPdfPoint(tela.left + tela.width + 1, tela.top - 1);
+    // para cima, a partir do topo das letras (≈ 0,8 do tamanho acima da base)
+    let inicio = tela.top - 0.5;
+    for (let y = base - 0.8 * px; y >= tela.top - 3; y -= passo) {
+      if (ehLinha(y)) { inicio = y + passo + 0.3; break; }
+    }
+    const [ax, ay] = viewport.convertToPdfPoint(tela.left - 0.5, fim);
+    const [bx, by] = viewport.convertToPdfPoint(tela.left + tela.width + 0.5, inicio);
     return { x: Math.min(ax, bx), y: Math.min(ay, by), w: Math.abs(bx - ax), h: Math.abs(by - ay) };
   }
 
   const distancia = (img, i, c) => Math.abs(img[i] - c[0]) + Math.abs(img[i + 1] - c[1]) + Math.abs(img[i + 2] - c[2]);
-
-  function mediana(v) {
-    const s = [...v].sort((p, q) => p - q);
-    return s[Math.floor(s.length / 2)];
-  }
 
   const css = ([r, g, b]) => `rgb(${r}, ${g}, ${b})`;
   const hex = (c) => `#${c.map((v) => v.toString(16).padStart(2, '0')).join('')}`;
