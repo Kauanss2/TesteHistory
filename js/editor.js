@@ -290,47 +290,71 @@
     return { x: Math.min(ax, bx), y: Math.min(ay, by), w: Math.abs(bx - ax), h: Math.abs(by - ay) };
   }
 
-  // Bordas verticais (de tabela) que atravessam a área coberta: colunas de pixels
-  // que continuam ACIMA e ABAIXO da cobertura e ocupam quase toda a altura dela.
-  // (Traço de letra, como a perna do "1", não continua fora do texto.) Elas são
-  // redesenhadas por cima da cobertura, para a tabela não ficar com a linha quebrada.
+  // Bordas verticais (de tabela) que atravessam a área coberta. Uma coluna de pixels
+  // só conta como borda se:
+  // - continua por pelo menos BORDA_MIN pontos acima OU abaixo da cobertura (borda
+  //   de tabela atravessa a célula; letra não: o "ANO" logo acima do ano tem ~7 pt,
+  //   e antes uma coluna do "2" com o "A" em cima e a linha da célula embaixo era
+  //   tomada por borda e redesenhada como um bloco grosso);
+  // - ocupa ~toda a altura da cobertura (perna de letra não chega a tanto).
+  // Elas são redesenhadas por cima da cobertura, para a tabela não ficar quebrada.
   // Retorna [{ x, w (pontos do PDF), cor }].
+  const BORDA_MIN = 12;
   function bordasVerticais(ctx, canvas, dpr, viewport, capa, fundo) {
+    const pt = viewport.scale * dpr; // pixels de análise por ponto do PDF
     const x0 = Math.max(0, Math.floor((capa.left - 1) * dpr));
     const x1 = Math.min(canvas.width, Math.ceil((capa.left + capa.width + 1) * dpr));
-    const yTopo = Math.max(0, Math.floor((capa.top - 3) * dpr));
-    const yBase = Math.min(canvas.height, Math.ceil((capa.top + capa.height + 3) * dpr));
+    const yTopo = Math.max(0, Math.floor(capa.top * dpr - (BORDA_MIN + 2) * pt));
+    const yBase = Math.min(canvas.height, Math.ceil((capa.top + capa.height) * dpr + (BORDA_MIN + 2) * pt));
     const w = x1 - x0;
     const h = yBase - yTopo;
     if (w <= 0 || h <= 0) return [];
     const img = ctx.getImageData(x0, yTopo, w, h).data;
     const dentroDe = Math.round(capa.top * dpr) - yTopo;
     const dentroAte = Math.round((capa.top + capa.height) * dpr) - yTopo;
-    const tinta = (col, lin) => distancia(img, (lin * w + col) * 4, fundo) > 80;
+    const tinta = (col, lin) => col >= 0 && col < w && distancia(img, (lin * w + col) * 4, fundo) > 80;
+    // tolera 1 px para os lados (suavização, borda levemente inclinada/curva)
+    const perto = (col, lin) => tinta(col - 1, lin) || tinta(col, lin) || tinta(col + 1, lin);
+    // quantos pontos a coluna continua com tinta, a partir de uma linha, num sentido
+    const seguidas = (col, de, passo) => {
+      let n = 0;
+      for (let lin = de; lin >= 0 && lin < h && perto(col, lin); lin += passo) n++;
+      return n / pt;
+    };
 
     const colunas = [];
     for (let col = 0; col < w; col++) {
-      // fora da cobertura: 1–2 px acima e abaixo dela
-      const acima = [dentroDe - 1, dentroDe - 2].some((l) => l >= 0 && tinta(col, l));
-      const abaixo = [dentroAte + 1, dentroAte + 2].some((l) => l < h && tinta(col, l));
-      if (!acima || !abaixo) continue;
+      if (!tinta(col, Math.max(0, dentroDe - 1)) && !tinta(col, Math.min(h - 1, dentroAte))) continue;
+      const acima = seguidas(col, dentroDe - 1, -1);
+      const abaixo = seguidas(col, dentroAte, +1);
+      if (Math.max(acima, abaixo) < BORDA_MIN) continue;
       let n = 0;
-      for (let lin = Math.max(0, dentroDe); lin < Math.min(h, dentroAte); lin++) if (tinta(col, lin)) n++;
-      if (n / Math.max(1, dentroAte - dentroDe) < 0.6) continue;
-      const i = ((dentroDe - 2 >= 0 ? dentroDe - 2 : 0) * w + col) * 4;
-      colunas.push({ col, cor: [img[i], img[i + 1], img[i + 2]], forca: distancia(img, i, fundo) });
+      for (let lin = Math.max(0, dentroDe); lin < Math.min(h, dentroAte); lin++) if (perto(col, lin)) n++;
+      if (n / Math.max(1, dentroAte - dentroDe) < 0.9) continue;
+      // cor e intensidade medidas longe do texto (3 pt para fora, do lado onde a borda é longa)
+      const lin = acima >= abaixo ? Math.max(0, dentroDe - Math.round(3 * pt)) : Math.min(h - 1, dentroAte + Math.round(3 * pt));
+      if (tinta(col, lin)) colunas.push({ col, lin });
     }
 
     // junta colunas vizinhas numa linha só
-    const linhas = [];
+    const grupos = [];
     for (const c of colunas) {
-      const ult = linhas[linhas.length - 1];
-      if (ult && c.col === ult.cols[ult.cols.length - 1].col + 1) ult.cols.push(c); else linhas.push({ cols: [c] });
+      const ult = grupos[grupos.length - 1];
+      if (ult && c.col === ult.fim + 1) ult.fim = c.col; else grupos.push({ ini: c.col, fim: c.col, lin: c.lin });
     }
-    return linhas.map(({ cols }) => {
-      // cor: a mais escura (o centro da linha). Espessura e centro pesados pela
-      // intensidade: as colunas suavizadas das bordas contam só em parte, senão a
-      // linha redesenhada sai mais grossa que a original.
+    return grupos.map(({ ini, fim, lin }) => {
+      // Espessura, centro e cor medidos na fileira "limpa" (3 pt longe do texto),
+      // estendendo para os lados enquanto houver tinta: perto de um canto
+      // arredondado só parte das colunas passa nos testes, e a linha sairia fina.
+      while (ini > 0 && tinta(ini - 1, lin)) ini--;
+      while (fim < w - 1 && tinta(fim + 1, lin)) fim++;
+      const cols = [];
+      for (let col = Math.max(0, ini - 1); col <= Math.min(w - 1, fim + 1); col++) {
+        const i = (lin * w + col) * 4;
+        cols.push({ col, cor: [img[i], img[i + 1], img[i + 2]], forca: distancia(img, i, fundo) });
+      }
+      // cor: a mais escura (o centro). Espessura e centro pesados pela intensidade:
+      // as colunas suavizadas das beiradas contam só em parte.
       const centro = cols.reduce((a, b) => (a.forca >= b.forca ? a : b));
       const soma = cols.reduce((s, c) => s + c.forca, 0);
       const largura = Math.max(0.5, soma / centro.forca);
