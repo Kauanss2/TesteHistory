@@ -44,8 +44,9 @@
       .barra { flex-wrap: wrap; padding: 8px 10px; padding-top: max(8px, env(safe-area-inset-top)); gap: 6px; }
       .barra h1 { display: none; }
       .status { order: 3; flex-basis: 100%; font-size: 12px; }
-      .acoes { flex: 1; flex-wrap: nowrap; justify-content: space-between; gap: 4px; }
-      .acoes button { padding: 9px 10px; }
+      .acoes { flex: 1; flex-wrap: wrap; justify-content: space-between; gap: 4px; }
+      .acoes button { padding: 9px 7px; }
+      .zoom-botoes button { min-width: 30px; }
       .longo { display: none; }
       .curto { display: inline; }
       .paginas { padding: 8px; padding-bottom: max(8px, env(safe-area-inset-bottom)); }
@@ -60,6 +61,7 @@
     <span id="status" class="status">Abra um PDF e toque no texto que quer mudar.</span>
     <div class="acoes">
       <button type="button" data-acao="abrir">Abrir<span class="longo"> PDF…</span></button>
+      <button type="button" data-acao="correcao" title="Abra um PDF já baixado por este app: ele tira as alterações antigas e as refaz com as correções atuais">Correção</button>
       <span class="zoom-botoes">
         <button type="button" data-acao="menos" title="Diminuir">−</button>
         <button type="button" data-acao="mais" title="Aumentar">+</button>

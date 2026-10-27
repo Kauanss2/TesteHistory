@@ -13,6 +13,15 @@ e não é enviado para lugar nenhum.
    move o texto (setas ou arrastando a alça ✥).
 3. **Baixar PDF editado** gera `<nome>-editado.pdf`. O arquivo original não é alterado.
 
+## Correção
+
+**Correção** recebe um PDF já baixado por este app (`…-editado.pdf`) e o refaz
+com as regras atuais: tira a camada que o app tinha desenhado (o que devolve o
+PDF original), lê dela cada alteração (texto, posição, fonte, tamanho, cor) e
+as aplica de novo. Confira e toque em **Baixar**. Serve para PDFs baixados antes
+de uma correção do app e também para PDF editado mais de uma vez. Um PDF sem
+alterações deste app é recusado (use **Abrir**).
+
 ## Continuar depois
 
 - **Automático:** as alterações ficam guardadas no aparelho. Abrindo o mesmo PDF

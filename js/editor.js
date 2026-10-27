@@ -3,7 +3,7 @@
 // No PDF baixado o texto antigo é coberto com a cor do fundo (parando antes de uma
 // linha/pontilhado logo abaixo dele, para não apagá-la) e o novo é escrito por cima.
 (function () {
-  const { PDFDocument, StandardFonts, rgb } = PDFLib;
+  const { PDFDocument, StandardFonts, rgb, PDFName, PDFArray, PDFRawStream, decodePDFRawStream } = PDFLib;
   pdfjsLib.GlobalWorkerOptions.workerSrc = 'vendor/pdf.worker.min.js';
 
   const arquivo = document.getElementById('arquivo');
@@ -34,8 +34,9 @@
 
   // ---------- Abrir e desenhar ----------
 
-  // lista: edições vindas de um arquivo .edicao.json (senão, as lembradas deste PDF)
-  async function abrir(bytes, nome, lista = null) {
+  // lista: edições vindas de um arquivo .edicao.json ou da Correção (senão, as
+  // lembradas deste PDF). aviso: texto do status quando alguma edição é aplicada.
+  async function abrir(bytes, nome, lista = null, aviso = (n) => `${n} alteração(ões) anterior(es) restaurada(s). "Desfazer" começa do zero.`) {
     original = bytes;
     idPdf = impressao(bytes);
     nomeArquivo = nome.replace(/\.pdf$/i, '');
@@ -60,7 +61,7 @@
       return;
     }
     const n = restaurarEdicoes(lista ?? lembradas());
-    atualizarStatus(n ? `${n} alteração(ões) anterior(es) restaurada(s). "Desfazer" começa do zero.` : undefined);
+    atualizarStatus(n ? aviso(n) : undefined);
     lembrar();
   }
 
@@ -95,9 +96,22 @@
 
   // Liga cada edição ao trecho certo: pelo id, conferindo o texto original;
   // se não bater, procura o mesmo texto na mesma página.
+  // Edições da Correção não têm id: vêm com a cobertura antiga e a posição do texto
+  // (pontos do PDF) e são ligadas pelo trecho que a cobertura escondia.
   function restaurarEdicoes(lista) {
     const usados = new Set();
     for (const s of lista) {
+      if (s.capa) {
+        const t = trechoSobCapa(s);
+        if (!t) continue;
+        usados.add(t.id);
+        const e = s.estado;
+        edicoes.set(t.id, e.texto === undefined
+          ? { ...padrao(t), texto: '' } // só cobriu (texto apagado)
+          : { texto: e.texto, familia: e.familia, negrito: e.negrito, italico: e.italico, tamanho: e.tamanho, cor: e.cor, dx: e.x - t.x, dy: e.y - t.y });
+        aplicar(t);
+        continue;
+      }
       let t = trechos[s.id];
       if (!t || t.original !== s.original || usados.has(t.id)) {
         t = trechos.find((x) => x.pagina === s.pagina && x.original === s.original && !usados.has(x.id));
@@ -108,6 +122,144 @@
       aplicar(t);
     }
     return usados.size;
+  }
+
+  // O trecho da página que a cobertura antiga mais escondia (mais da metade dele),
+  // ou, se nenhum, o que tem a linha de base dentro dela.
+  function trechoSobCapa({ pagina, capa: c }) {
+    let melhor = null;
+    let nota = 0.5;
+    for (const t of trechos) {
+      if (t.pagina !== pagina) continue;
+      const r = t.capaPdf;
+      const w = Math.min(r.x + r.w, c.x + c.w) - Math.max(r.x, c.x);
+      const h = Math.min(r.y + r.h, c.y + c.h) - Math.max(r.y, c.y);
+      const n = w > 0 && h > 0 ? (w * h) / (r.w * r.h) : 0;
+      if (n > nota) { nota = n; melhor = t; }
+    }
+    return melhor ?? trechos.find((t) => t.pagina === pagina && t.x >= c.x && t.x <= c.x + c.w && t.y >= c.y && t.y <= c.y + c.h);
+  }
+
+  // ---------- Correção ----------
+  // Um PDF baixado por este app tem, em cada página, o conteúdo original entre um
+  // "q" e um "Q" e depois a camada do app: só retângulos (cobertura e bordas
+  // redesenhadas) e textos nas fontes padrão Helvetica/Times/Courier. A Correção
+  // tira essa camada (o que devolve o PDF original), lê dela as alterações e as
+  // aplica de novo, agora com as medições atuais. Funciona também com PDF editado
+  // mais de uma vez (camadas uma dentro da outra).
+
+  function conteudo(doc, ref, limite = Infinity) {
+    const s = doc.context.lookup(ref);
+    if (!(s instanceof PDFRawStream)) return null;
+    if (s.contents.length > limite) return null;
+    try { return new TextDecoder('latin1').decode(decodePDFRawStream(s).decode()); } catch { return null; }
+  }
+
+  async function desfazerCamadas(bytes) {
+    const doc = await PDFDocument.load(bytes);
+    let lista = [];
+    doc.getPages().forEach((page, pagina) => {
+      for (;;) {
+        const cont = page.node.get(PDFName.of('Contents'));
+        if (!(cont instanceof PDFArray) || cont.size() < 3) break;
+        const refs = cont.asArray();
+        if (conteudo(doc, refs[0], 64)?.trim() !== 'q') break;
+        let k = -1; // o "Q" sozinho mais ao fim: depois dele vem a camada do app
+        for (let i = refs.length - 2; i > 0; i--) if (conteudo(doc, refs[i], 64)?.trim() === 'Q') { k = i; break; }
+        if (k < 0) break;
+        const camada = lerCamada(refs.slice(k + 1).map((r) => conteudo(doc, r) ?? '').join('\n'));
+        if (!camada) break;
+        // camadas de dentro são mais antigas: ficam antes na lista
+        lista = [...camada.map((e) => ({ ...e, pagina })), ...lista];
+        page.node.set(PDFName.of('Contents'), doc.context.obj(refs.slice(1, k)));
+      }
+    });
+    return lista.length ? { bytes: await doc.save(), edicoes: lista } : null;
+  }
+
+  // WinAnsi (codificação das fontes padrão) nos códigos 0x80–0x9F; o resto é Latin-1.
+  const WINANSI = { 0x80: '€', 0x82: '‚', 0x83: 'ƒ', 0x84: '„', 0x85: '…', 0x86: '†', 0x87: '‡', 0x88: 'ˆ', 0x89: '‰', 0x8a: 'Š', 0x8b: '‹', 0x8c: 'Œ', 0x8e: 'Ž', 0x91: '‘', 0x92: '’', 0x93: '“', 0x94: '”', 0x95: '•', 0x96: '–', 0x97: '—', 0x98: '˜', 0x99: '™', 0x9a: 'š', 0x9b: '›', 0x9c: 'œ', 0x9e: 'ž', 0x9f: 'Ÿ' };
+  const deHexWinAnsi = (h) => (h.replace(/\s/g, '').match(/../g) || []).map((b) => {
+    const c = parseInt(b, 16);
+    return WINANSI[c] ?? String.fromCharCode(c);
+  }).join('');
+
+  // Lê a camada do app. Retorna [{ capa: {x,y,w,h}, estado: {texto, familia, negrito,
+  // italico, tamanho, cor, x, y} }], ou null se tiver qualquer coisa que o app não
+  // desenha (aí não é uma camada dele e o PDF fica como está).
+  function lerCamada(texto) {
+    const tokens = texto.match(/<[0-9A-Fa-f\s]*>|\[[^\]]*\]|\/[^\s/[\]<>()]+|[^\s[\]<>/()]+/g) || [];
+    const OPERADORES = new Set(['q', 'Q', 'rg', 'w', 'd', 'cm', 'm', 'l', 'h', 'f', 'BT', 'ET', 'Tf', 'TL', 'Tm', 'Tj', 'T*']);
+    const blocos = [];
+    const pilha = [];
+    let args = [];
+    let cor = [0, 0, 0];
+    let tx = 0;
+    let ty = 0;
+    let pontos = [];
+    let fonte = null;
+    let tamanho = 0;
+    let tm = [0, 0];
+    for (const tk of tokens) {
+      if (!/^[A-Za-z*]+$/.test(tk) || tk === 'T') { args.push(tk); continue; }
+      if (!OPERADORES.has(tk)) return null;
+      const n = args.map(Number);
+      switch (tk) {
+        case 'q': pilha.push([tx, ty]); break;
+        case 'Q': [tx, ty] = pilha.pop() || [0, 0]; break;
+        case 'rg': cor = n.slice(0, 3).map((v) => Math.round(v * 255)); break;
+        case 'cm':
+          if (n[0] !== 1 || n[1] !== 0 || n[2] !== 0 || n[3] !== 1) return null; // o app só translada
+          tx += n[4]; ty += n[5];
+          break;
+        case 'm': case 'l': pontos.push([n[0] + tx, n[1] + ty]); break;
+        case 'f': {
+          if (!pontos.length) return null;
+          const xs = pontos.map((p) => p[0]);
+          const ys = pontos.map((p) => p[1]);
+          const x = Math.min(...xs);
+          const y = Math.min(...ys);
+          blocos.push({ tipo: 'ret', x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y, cor });
+          pontos = [];
+          break;
+        }
+        case 'Tf': {
+          const nome = args[0].slice(1);
+          if (!/^(Helvetica|Times|Courier)(-[A-Za-z]+)?-\d+$/.test(nome)) return null;
+          fonte = nome;
+          tamanho = n[1];
+          break;
+        }
+        case 'Tm': tm = [n[4], n[5]]; break;
+        case 'Tj':
+          if (!fonte || !/^</.test(args[0] || '')) return null;
+          blocos.push({
+            tipo: 'texto', texto: deHexWinAnsi(args[0].slice(1, -1)), x: tm[0], y: tm[1], tamanho, cor,
+            familia: fonte.startsWith('Times') ? 'Times' : fonte.startsWith('Courier') ? 'Courier' : 'Helvetica',
+            negrito: /Bold/.test(fonte), italico: /Oblique|Italic/.test(fonte),
+          });
+          break;
+        default: break;
+      }
+      args = [];
+    }
+
+    // cada alteração = cobertura, bordas redesenhadas (mesma altura, mais finas) e, se não foi apagado, o texto
+    const lista = [];
+    let atual = null;
+    const perto = (a, b) => Math.abs(a - b) < 0.01;
+    for (const b of blocos) {
+      if (b.tipo === 'ret') {
+        const borda = atual && !atual.temTexto && perto(b.y, atual.capa.y) && perto(b.h, atual.capa.h) && b.w < atual.capa.w;
+        if (!borda) { atual = { capa: { x: b.x, y: b.y, w: b.w, h: b.h }, estado: {} }; lista.push(atual); }
+      } else {
+        if (!atual || atual.temTexto) return null;
+        const { tipo, ...estado } = b;
+        atual.estado = estado;
+        atual.temTexto = true;
+      }
+    }
+    return lista.length ? lista.map(({ capa, estado }) => ({ capa, estado })) : null;
   }
 
   // Arquivo .edicao.json: o PDF original + as alterações, para continuar em outro aparelho.
@@ -586,6 +738,12 @@
   const acoes = {
     abrir() {
       desselecionar(); // as alterações já estão guardadas na memória
+      modoCorrecao = false;
+      arquivo.click();
+    },
+    correcao() {
+      desselecionar();
+      modoCorrecao = true;
       arquivo.click();
     },
     desfazer() {
@@ -652,11 +810,27 @@
   }
 
   // Abrir aceita o PDF ou um .edicao.json salvo por "Salvar edição".
+  // Correção aceita um PDF já baixado por este app (ver desfazerCamadas).
+  let modoCorrecao = false;
   arquivo.addEventListener('change', async (e) => {
     const f = e.target.files[0];
     e.target.value = '';
     if (!f) return;
     const bytes = new Uint8Array(await f.arrayBuffer());
+    if (modoCorrecao) {
+      modoCorrecao = false;
+      atualizarStatus('Corrigindo…');
+      let r = null;
+      try { r = await desfazerCamadas(bytes); } catch { /* não é PDF ou está protegido */ }
+      if (!r) {
+        atualizarStatus('Este PDF não tem alterações feitas por este app para corrigir. Para editar, use "Abrir".');
+        return;
+      }
+      const nome = f.name.replace(/\.pdf$/i, '').replace(/(-editado)+$/i, '');
+      abrir(r.bytes, `${nome}.pdf`, r.edicoes,
+        (n) => `Correção: ${n} alteração(ões) refeita(s) a partir do original. Confira e toque em "Baixar".`);
+      return;
+    }
     if (/\.json$/i.test(f.name) || f.type === 'application/json') {
       let dados;
       try {
