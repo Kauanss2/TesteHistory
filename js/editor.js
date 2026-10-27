@@ -437,8 +437,11 @@
     for (let y = base - 0.8 * px; y >= tela.top - 3; y -= passo) {
       if (ehLinha(y)) { inicio = y + passo + 0.3; break; }
     }
-    const [ax, ay] = viewport.convertToPdfPoint(tela.left - 0.5, fim);
-    const [bx, by] = viewport.convertToPdfPoint(tela.left + tela.width + 0.5, inicio);
+    // um pouco além das laterais (~0,6 pt): letras podem passar um tiquinho da
+    // largura oficial e sobrar encostadas numa borda (as bordas são redesenhadas)
+    const lado = Math.max(0.5, 0.6 * viewport.scale);
+    const [ax, ay] = viewport.convertToPdfPoint(tela.left - lado, fim);
+    const [bx, by] = viewport.convertToPdfPoint(tela.left + tela.width + lado, inicio);
     return { x: Math.min(ax, bx), y: Math.min(ay, by), w: Math.abs(bx - ax), h: Math.abs(by - ay) };
   }
 
@@ -483,23 +486,40 @@
       let n = 0;
       for (let lin = Math.max(0, dentroDe); lin < Math.min(h, dentroAte); lin++) if (perto(col, lin)) n++;
       if (n / Math.max(1, dentroAte - dentroDe) < 0.9) continue;
-      // cor e intensidade medidas longe do texto (3 pt para fora, do lado onde a borda é longa)
-      const lin = acima >= abaixo ? Math.max(0, dentroDe - Math.round(3 * pt)) : Math.min(h - 1, dentroAte + Math.round(3 * pt));
-      if (tinta(col, lin)) colunas.push({ col, lin });
+      colunas.push({ col, acima: acima >= abaixo });
     }
 
     // junta colunas vizinhas numa linha só
     const grupos = [];
     for (const c of colunas) {
       const ult = grupos[grupos.length - 1];
-      if (ult && c.col === ult.fim + 1) ult.fim = c.col; else grupos.push({ ini: c.col, fim: c.col, lin: c.lin });
+      if (ult && c.col === ult.fim + 1) ult.fim = c.col; else grupos.push({ ini: c.col, fim: c.col, acima: c.acima });
     }
-    return grupos.map(({ ini, fim, lin }) => {
-      // Espessura, centro e cor medidos na fileira "limpa" (3 pt longe do texto),
-      // estendendo para os lados enquanto houver tinta: perto de um canto
-      // arredondado só parte das colunas passa nos testes, e a linha sairia fina.
-      while (ini > 0 && tinta(ini - 1, lin)) ini--;
-      while (fim < w - 1 && tinta(fim + 1, lin)) fim++;
+    // Espessura, centro e cor são medidos numa fileira "limpa": do lado onde a borda
+    // é longa, a fileira (até BORDA_MIN pt do texto) em que o trecho de tinta em
+    // volta da borda é o mais estreito, ou seja, onde nada encosta nela. (Uma fileira
+    // fixa caía no "ANO" logo acima do ano, cujas letras encostam na borda e eram
+    // somadas à espessura.) O trecho de tinta é estendido para os lados porque,
+    // perto de um canto arredondado, só parte das colunas passa nos testes acima.
+    const trechoDeTinta = (ini, fim, lin) => {
+      let a = -1;
+      for (let col = ini; col <= fim; col++) if (tinta(col, lin)) { a = col; break; }
+      if (a < 0) return null;
+      let b = a;
+      while (a > 0 && tinta(a - 1, lin)) a--;
+      while (b < w - 1 && tinta(b + 1, lin)) b++;
+      return { ini: a, fim: b };
+    };
+    return grupos.map((g) => {
+      let melhor = null;
+      for (let d = Math.round(pt); d <= Math.round((BORDA_MIN - 1) * pt); d++) {
+        const lin = g.acima ? dentroDe - d : dentroAte + d;
+        if (lin < 0 || lin >= h) break;
+        const r = trechoDeTinta(g.ini, g.fim, lin);
+        if (r && (!melhor || r.fim - r.ini < melhor.fim - melhor.ini)) melhor = { ...r, lin };
+      }
+      if (!melhor) return null;
+      const { ini, fim, lin } = melhor;
       const cols = [];
       for (let col = Math.max(0, ini - 1); col <= Math.min(w - 1, fim + 1); col++) {
         const i = (lin * w + col) * 4;
@@ -514,7 +534,7 @@
       const [ax] = viewport.convertToPdfPoint((x0 + meio - largura / 2) / dpr, 0);
       const [bx] = viewport.convertToPdfPoint((x0 + meio + largura / 2) / dpr, 0);
       return { x: Math.min(ax, bx), w: Math.abs(bx - ax), cor: centro.cor };
-    });
+    }).filter(Boolean);
   }
 
   const distancia = (img, i, c) => Math.abs(img[i] - c[0]) + Math.abs(img[i + 1] - c[1]) + Math.abs(img[i + 2] - c[2]);
